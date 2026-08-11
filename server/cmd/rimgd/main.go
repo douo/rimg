@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -93,6 +94,9 @@ func runServe(arguments []string) {
 	flags.SetOutput(os.Stderr)
 	socketPath := flags.String("socket", "", "Unix socket path")
 	cacheDir := flags.String("cache-dir", "", "persistent cache directory")
+	exitOnStdinEOF := flags.Bool(
+		"exit-on-stdin-eof", false, "stop serving when standard input closes",
+	)
 	if err := flags.Parse(arguments); err != nil {
 		os.Exit(2)
 	}
@@ -101,10 +105,20 @@ func runServe(arguments []string) {
 		os.Exit(2)
 	}
 
-	ctx, stop := signal.NotifyContext(
+	signalContext, stop := signal.NotifyContext(
 		context.Background(), os.Interrupt, syscall.SIGHUP, syscall.SIGTERM,
 	)
 	defer stop()
+	ctx := signalContext
+	if *exitOnStdinEOF {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(signalContext)
+		defer cancel()
+		go func() {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			cancel()
+		}()
+	}
 	if err := rimgserver.Serve(ctx, rimgserver.Options{
 		SocketPath: *socketPath,
 		CacheDir:   *cacheDir,

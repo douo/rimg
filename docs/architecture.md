@@ -33,6 +33,8 @@ Opening an original remains an explicit TRAMP operation.
   cache directory.
 - Each Emacs session starts a temporary `rimgd serve` process with a unique,
   short Unix socket path.
+- The SSH invocation enables stdin-EOF shutdown, so closing the session channel
+  cancels rimgd even on sshd configurations that do not deliver SIGHUP.
 - The Unix runtime directory is mode `0700`; the socket is mode `0600`.
 - `rimgd` never listens on remote TCP.
 - SSH binds an ephemeral local port explicitly on `127.0.0.1` and forwards it

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,14 +18,22 @@ import (
 )
 
 func TestServeExposesHealthOnPrivateUnixSocketAndCleansUpAfterSIGTERM(t *testing.T) {
-	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGTERM)
+	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGTERM, false)
 }
 
 func TestServeExposesHealthOnPrivateUnixSocketAndCleansUpAfterSIGHUP(t *testing.T) {
-	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGHUP)
+	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGHUP, false)
 }
 
-func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T, shutdownSignal os.Signal) {
+func TestServeExitsAndCleansUpAfterStdinEOF(t *testing.T) {
+	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, nil, true)
+}
+
+func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(
+	t *testing.T,
+	shutdownSignal os.Signal,
+	exitOnStdinEOF bool,
+) {
 	t.Helper()
 	tempDir, err := os.MkdirTemp("/tmp", "rimg-test-")
 	if err != nil {
@@ -39,10 +48,21 @@ func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T, shutdown
 
 	socket := filepath.Join(tempDir, "rimgd.sock")
 	cacheDir := filepath.Join(tempDir, "cache")
-	command := exec.Command(binary, "serve", "--socket", socket, "--cache-dir", cacheDir)
+	arguments := []string{"serve", "--socket", socket, "--cache-dir", cacheDir}
+	if exitOnStdinEOF {
+		arguments = append(arguments, "--exit-on-stdin-eof")
+	}
+	command := exec.Command(binary, arguments...)
 	var processOutput bytes.Buffer
 	command.Stdout = &processOutput
 	command.Stderr = &processOutput
+	var stdin io.WriteCloser
+	if exitOnStdinEOF {
+		stdin, err = command.StdinPipe()
+		if err != nil {
+			t.Fatalf("create rimgd stdin pipe: %v", err)
+		}
+	}
 	if err := command.Start(); err != nil {
 		t.Fatalf("start rimgd: %v", err)
 	}
@@ -118,7 +138,11 @@ func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T, shutdown
 		t.Fatalf("socket permissions = %04o, want 0600", permissions)
 	}
 
-	if err := command.Process.Signal(shutdownSignal); err != nil {
+	if exitOnStdinEOF {
+		if err := stdin.Close(); err != nil {
+			t.Fatalf("close rimgd stdin: %v", err)
+		}
+	} else if err := command.Process.Signal(shutdownSignal); err != nil {
 		t.Fatalf("signal rimgd with %v: %v", shutdownSignal, err)
 	}
 	waited := make(chan error, 1)
@@ -130,7 +154,8 @@ func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T, shutdown
 			t.Fatalf("rimgd exit: %v\n%s", err, processOutput.String())
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatalf("rimgd did not exit after %v", shutdownSignal)
+		t.Fatalf("rimgd did not exit after signal %v (stdin EOF: %t)",
+			shutdownSignal, exitOnStdinEOF)
 	}
 
 	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {

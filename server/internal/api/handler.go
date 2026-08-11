@@ -156,13 +156,19 @@ func (handler *handler) handleThumbnail(response http.ResponseWriter, request *h
 	if contentType == "" {
 		contentType = contentTypeForFormat(input.Format)
 	}
+	etag := `"` + result.Key + `"`
 	response.Header().Set("Content-Type", contentType)
-	response.Header().Set("ETag", `"`+result.Key+`"`)
+	response.Header().Set("ETag", etag)
 	response.Header().Set("X-Rimg-Key", result.Key)
 	if result.Hit {
 		response.Header().Set("X-Rimg-Cache", "HIT")
 	} else {
 		response.Header().Set("X-Rimg-Cache", "MISS")
+	}
+	if request.Header.Get("If-None-Match") == etag {
+		response.Header().Set("X-Rimg-Not-Modified", "true")
+		response.WriteHeader(http.StatusOK)
+		return
 	}
 	response.WriteHeader(http.StatusOK)
 	_, _ = response.Write(result.Data)

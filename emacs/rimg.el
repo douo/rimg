@@ -12,11 +12,15 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dired)
+(require 'image-dired)
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'tramp)
 (require 'url)
 (require 'url-http)
+(require 'url-queue)
 
 (defvar url-http-response-status)
 
@@ -47,6 +51,13 @@
   "Whether rimg may install its versioned rimgd binary through TRAMP."
   :type 'boolean)
 
+(defcustom rimg-local-cache-directory
+  (expand-file-name
+   "rimg-emacs/"
+   (or (getenv "XDG_CACHE_HOME") (expand-file-name "~/.cache/")))
+  "Local directory containing thumbnails returned by rimgd."
+  :type 'directory)
+
 (defcustom rimg-server-cache-directory "~/.cache/rimg/thumbs"
   "Persistent cache directory on each remote rimgd host."
   :type 'string)
@@ -54,6 +65,22 @@
 (defcustom rimg-connect-timeout 5.0
   "Seconds to wait for rimgd health after SSH starts."
   :type 'number)
+
+(defcustom rimg-thumbnail-size 256
+  "Maximum width and height of generated thumbnails."
+  :type 'integer)
+
+(defcustom rimg-thumbnail-jpeg-quality 82
+  "JPEG quality requested for generated thumbnails."
+  :type 'integer)
+
+(defcustom rimg-http-parallelism 6
+  "Maximum number of concurrent rimg HTTP requests."
+  :type 'integer)
+
+(defcustom rimg-page-size 200
+  "Maximum number of thumbnails displayed on one gallery page."
+  :type 'integer)
 
 (defcustom rimg-ssh-port-attempts 10
   "Maximum local port attempts for an SSH session."
@@ -85,6 +112,25 @@
 
 (defvar rimg--sessions (make-hash-table :test #'equal)
   "Map remote identities to active or reusable rimg sessions.")
+
+(defvar-local rimg--gallery-session nil)
+(defvar-local rimg--gallery-dired-buffer nil)
+(defvar-local rimg--gallery-files nil)
+(defvar-local rimg--gallery-page-index 0)
+(defvar-local rimg--gallery-generation 0)
+(defvar-local rimg--gallery-pending 0)
+
+(defvar rimg-thumbnail-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "]") #'rimg-next-page)
+    (define-key map (kbd "[") #'rimg-previous-page)
+    map)
+  "Keymap enabled in Image-Dired buffers managed by rimg.")
+
+(define-minor-mode rimg-thumbnail-mode
+  "Minor mode for paginated rimg Image-Dired galleries."
+  :lighter " rimg"
+  :keymap rimg-thumbnail-mode-map)
 
 (defconst rimg--session-transitions
   '((absent . (bootstrapping dead))
@@ -171,7 +217,8 @@ remote command starts BINARY-PATH with CACHE-DIR."
           (mapconcat #'shell-quote-argument
                      (list "exec" binary-path "serve"
                            "--socket" socket-path
-                           "--cache-dir" cache-dir)
+                           "--cache-dir" cache-dir
+                           "--exit-on-stdin-eof")
                      " ")))
     (append
      (list rimg-ssh-program
@@ -213,6 +260,297 @@ remote command starts BINARY-PATH with CACHE-DIR."
 (defun rimg--remote-file-name (remote localname)
   "Build a TRAMP file name for REMOTE and LOCALNAME."
   (concat (rimg--remote-prefix remote) localname))
+
+(defun rimg--local-thumbnail-path (remote key format)
+  "Return the local cache path for REMOTE's server KEY in FORMAT."
+  (unless (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'" key)
+    (error "rimg: invalid thumbnail cache key: %s" key))
+  (let ((extension
+         (pcase format
+           ("jpeg" ".jpg")
+           ("png" ".png")
+           (_ (error "rimg: unsupported local thumbnail format: %s" format))))
+        (identity-hash
+         (secure-hash 'sha256 (rimg--remote-identity remote))))
+    (expand-file-name
+     (format "%s/%s/%s%s" identity-hash (substring key 0 2) key extension)
+     rimg-local-cache-directory)))
+
+(defun rimg--write-local-file-atomically (path data)
+  "Write DATA to local PATH atomically and return PATH."
+  (let ((directory (file-name-directory path)) temporary)
+    (make-directory directory t)
+    (set-file-modes directory #o700)
+    (setq temporary (make-temp-file (concat path ".tmp.")))
+    (unwind-protect
+        (let ((coding-system-for-write 'no-conversion))
+          (write-region data nil temporary nil 'silent)
+          (set-file-modes temporary #o600)
+          (rename-file temporary path t)
+          (setq temporary nil)
+          path)
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+(defun rimg--store-local-thumbnail (remote key format data)
+  "Atomically store DATA for REMOTE's server KEY in FORMAT and return its path."
+  (rimg--write-local-file-atomically
+   (rimg--local-thumbnail-path remote key format) data))
+
+(defun rimg--local-reference-path (remote original-localname)
+  "Return the cache reference path for REMOTE ORIGINAL-LOCALNAME and thumb spec."
+  (let* ((identity-hash
+          (secure-hash 'sha256 (rimg--remote-identity remote)))
+         (request-key
+          (secure-hash
+           'sha256
+           (format "%s\0thumb:%dx%d:contain:jpeg:q%d"
+                   original-localname
+                   rimg-thumbnail-size rimg-thumbnail-size
+                   rimg-thumbnail-jpeg-quality))))
+    (expand-file-name
+     (format "%s/refs/%s/%s" identity-hash
+             (substring request-key 0 2) request-key)
+     rimg-local-cache-directory)))
+
+(defun rimg--cached-local-thumbnail (remote original-localname)
+  "Return (KEY . PATH) for REMOTE ORIGINAL-LOCALNAME when its local cache exists."
+  (let ((reference (rimg--local-reference-path remote original-localname)))
+    (when (file-readable-p reference)
+      (let ((key
+             (with-temp-buffer
+               (insert-file-contents-literally reference)
+               (string-trim (buffer-string)))))
+        (condition-case nil
+            (let ((path (rimg--local-thumbnail-path remote key "jpeg")))
+              (when (file-regular-p path)
+                (cons key path)))
+          (error nil))))))
+
+(defun rimg--response-body-start ()
+  "Return the start position of the current HTTP response body."
+  (goto-char (point-min))
+  (unless (re-search-forward "\r?\n\r?\n" nil t)
+    (error "rimg: malformed HTTP response"))
+  (point))
+
+(defun rimg--response-header (name body-start)
+  "Return HTTP header NAME before BODY-START in the current buffer."
+  (save-excursion
+    (save-restriction
+      (narrow-to-region (point-min) body-start)
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (when (re-search-forward
+               (format "^%s:[ \t]*\\([^\r\n]+\\)" (regexp-quote name))
+               nil t)
+          (string-trim (match-string-no-properties 1)))))))
+
+(defun rimg--thumbnail-response (status remote format reference-path cached
+                                        callback error-callback)
+  "Handle a queued thumbnail response and invoke CALLBACK or ERROR-CALLBACK."
+  (let ((response-buffer (current-buffer)))
+    (unwind-protect
+        (condition-case error-data
+            (progn
+              (when-let* ((transport-error (plist-get status :error)))
+                (error "rimg: thumbnail transport failed: %s" transport-error))
+              (let* ((body-start (rimg--response-body-start))
+                     (key (rimg--response-header "X-Rimg-Key" body-start))
+                     (not-modified
+                      (rimg--response-header
+                       "X-Rimg-Not-Modified" body-start)))
+                (unless key
+                  (error "rimg: thumbnail response omitted X-Rimg-Key"))
+                (unless (equal url-http-response-status 200)
+                  (error "rimg: thumbnail returned HTTP %s"
+                         url-http-response-status))
+                (if (equal not-modified "true")
+                    (progn
+                      (unless (and cached
+                                   (equal key (car cached))
+                                   (file-regular-p (cdr cached)))
+                        (error "rimg: local thumbnail is missing for revalidation"))
+                      (funcall callback (cdr cached)))
+                  (let* ((data (buffer-substring-no-properties
+                                body-start (point-max)))
+                         (path (rimg--store-local-thumbnail
+                                remote key format data)))
+                    (rimg--write-local-file-atomically
+                     reference-path (concat key "\n"))
+                    (funcall callback path)))))
+          (error
+           (if error-callback
+               (funcall error-callback error-data)
+             (message "%s" (error-message-string error-data)))))
+      (when (buffer-live-p response-buffer)
+        (kill-buffer response-buffer)))))
+
+(defun rimg--request-thumbnail (session original-file callback
+                                        &optional error-callback)
+  "Request ORIGINAL-FILE through SESSION and call CALLBACK with a local path."
+  (unless (rimg--session-live-ready-p session)
+    (error "rimg: thumbnail request requires a ready session"))
+  (let* ((remote (rimg--session-remote session))
+         (original-remote (rimg--remote-from-path original-file)))
+    (unless (equal (rimg--remote-identity remote)
+                   (rimg--remote-identity original-remote))
+      (error "rimg: original file belongs to a different remote"))
+    (let* ((original-localname (rimg--remote-localname original-remote))
+           (reference-path
+            (rimg--local-reference-path remote original-localname))
+           (cached (rimg--cached-local-thumbnail remote original-localname))
+           (url-request-method "POST")
+           (url-request-extra-headers
+            (append
+             '(("Content-Type" . "application/json"))
+             (when cached
+               `(("If-None-Match" . ,(format "\"%s\"" (car cached)))))))
+          (url-request-data
+           (json-serialize
+            `((path . ,original-localname)
+              (width . ,rimg-thumbnail-size)
+              (height . ,rimg-thumbnail-size)
+              (fit . "contain")
+              (format . "jpeg")
+              (quality . ,rimg-thumbnail-jpeg-quality)))))
+      (setq url-queue-parallel-processes rimg-http-parallelism)
+      (url-queue-retrieve
+       (format "http://127.0.0.1:%d/v1/thumb"
+               (rimg--session-local-port session))
+       #'rimg--thumbnail-response
+       (list remote "jpeg" reference-path cached callback error-callback)
+       t t))))
+
+(defun rimg--gallery-page-files ()
+  "Return the files for the current rimg gallery page."
+  (let* ((start (* rimg--gallery-page-index rimg-page-size))
+         (end (min (length rimg--gallery-files) (+ start rimg-page-size))))
+    (if (< start end)
+        (seq-subseq rimg--gallery-files start end)
+      nil)))
+
+(defun rimg--gallery-page-count ()
+  "Return the number of pages in the current rimg gallery."
+  (/ (+ (length rimg--gallery-files) rimg-page-size -1) rimg-page-size))
+
+(defun rimg--gallery-request-finished (buffer generation)
+  "Record one completed request for BUFFER's GENERATION."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (= generation rimg--gallery-generation)
+        (setq rimg--gallery-pending (1- rimg--gallery-pending))
+        (when (and (zerop rimg--gallery-pending)
+                   (get-buffer-window buffer t))
+          (image-dired--line-up-with-method))))))
+
+(defun rimg--gallery-thumbnail-ready (buffer marker generation original
+                                             dired-buffer thumbnail)
+  "Replace MARKER in BUFFER with THUMBNAIL associated with ORIGINAL."
+  (when (and (buffer-live-p buffer) (marker-buffer marker))
+    (with-current-buffer buffer
+      (when (= generation rimg--gallery-generation)
+        (let ((inhibit-read-only t))
+          (goto-char marker)
+          (delete-char 1)
+          (image-dired-insert-thumbnail thumbnail original dired-buffer)
+          (setq image-dired--number-of-thumbnails
+                (1+ image-dired--number-of-thumbnails)))
+        (set-marker marker nil)
+        (rimg--gallery-request-finished buffer generation)))))
+
+(defun rimg--gallery-thumbnail-error (buffer marker generation error-data)
+  "Replace a failed thumbnail at MARKER with a compact error indicator."
+  (when (and (buffer-live-p buffer) (marker-buffer marker))
+    (with-current-buffer buffer
+      (when (= generation rimg--gallery-generation)
+        (let ((inhibit-read-only t))
+          (goto-char marker)
+          (delete-char 1)
+          (insert (propertize "!" 'face 'error
+                              'help-echo (error-message-string error-data))))
+        (set-marker marker nil)
+        (rimg--gallery-request-finished buffer generation)))))
+
+(defun rimg--render-gallery-page (buffer)
+  "Render BUFFER's current rimg gallery page."
+  (let (jobs generation)
+    (with-current-buffer buffer
+      (setq rimg--gallery-generation (1+ rimg--gallery-generation)
+            generation rimg--gallery-generation)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (setq image-dired--number-of-thumbnails 0)
+        (dolist (original (rimg--gallery-page-files))
+          (let ((marker (copy-marker (point))))
+            (insert (propertize " " 'rimg-thumbnail-pending t) " ")
+            (push (cons marker original) jobs))))
+      (setq jobs (nreverse jobs)
+            rimg--gallery-pending (length jobs)))
+    (pop-to-buffer buffer)
+    (dolist (job jobs)
+      (let ((marker (car job))
+            (original (cdr job)))
+        (rimg--request-thumbnail
+         (buffer-local-value 'rimg--gallery-session buffer)
+         original
+         (lambda (thumbnail)
+           (rimg--gallery-thumbnail-ready
+            buffer marker generation original
+            (buffer-local-value 'rimg--gallery-dired-buffer buffer)
+            thumbnail))
+         (lambda (error-data)
+           (rimg--gallery-thumbnail-error
+            buffer marker generation error-data)))))
+    buffer))
+
+(defun rimg--display-gallery (session dired-buffer files)
+  "Display FILES from DIRED-BUFFER through SESSION and return the gallery buffer."
+  (let ((buffer (image-dired-create-thumbnail-buffer)))
+    (with-current-buffer buffer
+      (setq rimg--gallery-session session
+            rimg--gallery-dired-buffer dired-buffer
+            rimg--gallery-files files
+            rimg--gallery-page-index 0)
+      (rimg-thumbnail-mode 1))
+    (rimg--render-gallery-page buffer)))
+
+(defun rimg-next-page ()
+  "Display the next page in the current rimg gallery."
+  (interactive nil image-dired-thumbnail-mode)
+  (unless (and rimg-thumbnail-mode rimg--gallery-files)
+    (user-error "rimg: this is not an rimg gallery"))
+  (when (>= (1+ rimg--gallery-page-index) (rimg--gallery-page-count))
+    (user-error "rimg: already on the last page"))
+  (setq rimg--gallery-page-index (1+ rimg--gallery-page-index))
+  (rimg--render-gallery-page (current-buffer)))
+
+(defun rimg-previous-page ()
+  "Display the previous page in the current rimg gallery."
+  (interactive nil image-dired-thumbnail-mode)
+  (unless (and rimg-thumbnail-mode rimg--gallery-files)
+    (user-error "rimg: this is not an rimg gallery"))
+  (when (zerop rimg--gallery-page-index)
+    (user-error "rimg: already on the first page"))
+  (setq rimg--gallery-page-index (1- rimg--gallery-page-index))
+  (rimg--render-gallery-page (current-buffer)))
+
+(defun rimg--dired-image-files ()
+  "Return image files from the current Dired listing without relisting it."
+  (unless (derived-mode-p 'dired-mode)
+    (user-error "rimg: current buffer is not Dired"))
+  (let ((case-fold-search t) files)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((directory-line (looking-at-p dired-re-dir))
+              (file (dired-get-filename nil t)))
+          (when (and file
+                     (not directory-line)
+                     (string-match-p (image-dired--file-name-regexp) file))
+            (push file files)))
+        (forward-line 1)))
+    (nreverse files)))
 
 (defun rimg--remote-expanded-localname (remote localname)
   "Expand remote LOCALNAME and return its absolute remote-local path."
@@ -487,6 +825,19 @@ remote command starts BINARY-PATH with CACHE-DIR."
   (interactive)
   (rimg-disconnect directory)
   (rimg-connect directory))
+
+(defun rimg-dired ()
+  "Display a paginated rimg gallery for the current remote Dired buffer."
+  (interactive nil dired-mode)
+  (unless (derived-mode-p 'dired-mode)
+    (user-error "rimg: current buffer is not Dired"))
+  (let* ((dired-buffer (current-buffer))
+         (remote (rimg--remote-from-path default-directory))
+         (files (rimg--dired-image-files)))
+    (unless files
+      (user-error "rimg: current Dired listing contains no images"))
+    (rimg--display-gallery
+     (rimg--connect-remote remote) dired-buffer files)))
 
 (provide 'rimg)
 

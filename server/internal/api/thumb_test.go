@@ -80,6 +80,26 @@ func TestThumbnailRequestGeneratesThenReusesRemoteCache(t *testing.T) {
 	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
 		t.Fatal("cached thumbnail differs from generated thumbnail")
 	}
+
+	conditional := performJSONRequestWithHeaders(
+		t, handler, http.MethodPost, "/v1/thumb", requestBody,
+		map[string]string{"If-None-Match": first.Header().Get("ETag")},
+	)
+	if conditional.Code != http.StatusOK {
+		t.Fatalf("conditional status = %d, want 200", conditional.Code)
+	}
+	if conditional.Body.Len() != 0 {
+		t.Fatalf("conditional body = %d bytes, want 0", conditional.Body.Len())
+	}
+	if got := conditional.Header().Get("X-Rimg-Key"); got != cacheKey {
+		t.Fatalf("conditional cache key = %q, want %q", got, cacheKey)
+	}
+	if got := conditional.Header().Get("X-Rimg-Cache"); got != "HIT" {
+		t.Fatalf("conditional cache status = %q, want HIT", got)
+	}
+	if got := conditional.Header().Get("X-Rimg-Not-Modified"); got != "true" {
+		t.Fatalf("conditional not-modified marker = %q, want true", got)
+	}
 }
 
 func TestThumbnailRequestDecodesWebPInput(t *testing.T) {
@@ -419,12 +439,27 @@ func performJSONRequest(
 	body any,
 ) *httptest.ResponseRecorder {
 	t.Helper()
+	return performJSONRequestWithHeaders(t, handler, method, path, body, nil)
+}
+
+func performJSONRequestWithHeaders(
+	t *testing.T,
+	handler http.Handler,
+	method string,
+	path string,
+	body any,
+	headers map[string]string,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
 	request := httptest.NewRequest(method, path, bytes.NewReader(encoded))
 	request.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

@@ -56,6 +56,13 @@ X-Rimg-Key: <cache-key>
 X-Rimg-Cache: HIT|MISS
 ```
 
+When the client already has a local entry, it sends the quoted server key in
+`If-None-Match`. If that key is still current, rimgd returns `200 OK` with an
+empty body and `X-Rimg-Not-Modified: true`, plus `ETag`, `X-Rimg-Key`, and
+`X-Rimg-Cache` headers. This explicit 200 response is used because Emacs URL
+intercepts 304 to read its unrelated GET cache and clears 204 response buffers
+before invoking the caller's callback.
+
 ## Preview
 
 `POST /v1/preview` uses maximum dimensions rather than a thumbnail box. It
