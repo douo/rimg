@@ -280,22 +280,25 @@
         (kill-buffer dired-buffer))
       (delete-directory temp-root t))))
 
-(ert-deftest rimg-gallery-keeps-a-stable-grid-and-commits-in-file-order ()
+(ert-deftest rimg-gallery-lazily-loads-visible-slots-without-moving-point ()
   (let* ((temp-root (make-temp-file "rimg-gallery-layout-" t))
          (thumbnail-file (expand-file-name "thumb.png" temp-root))
          (image-dired-dir (expand-file-name "image-dired/" temp-root))
          (image-dired-tags-db-file
           (expand-file-name "tags.db" image-dired-dir))
          (image-dired-thumbnail-buffer "*rimg-layout-test-thumbnails*")
-         (rimg-page-size 3)
+         (rimg-page-size 200)
          (rimg-thumbnail-size 256)
+         (rimg-gallery-prefetch-rows 0)
          (remote (rimg--remote-from-path "/ssh:alice@example:/data/images/"))
          (session (rimg--session-create :remote remote :state 'ready))
          (dired-buffer (generate-new-buffer " *rimg-layout-test-dired*"))
-         (files '("/ssh:alice@example:/data/images/a.jpg"
-                  "/ssh:alice@example:/data/images/b.jpg"
-                  "/ssh:alice@example:/data/images/c.jpg"))
+         (files (mapcar
+                 (lambda (index)
+                   (format "/ssh:alice@example:/data/images/%04d.jpg" index))
+                 (number-sequence 0 999)))
          (callbacks (make-hash-table :test #'equal))
+         requested prepared
          (original-window-buffer (window-buffer (selected-window)))
          (original-line-up (symbol-function 'image-dired--line-up-with-method))
          (line-up-count 0)
@@ -309,13 +312,15 @@
               "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")))
           (cl-letf (((symbol-function 'rimg--request-thumbnail)
                      (lambda (_session original callback &optional error-callback)
+                       (setq requested (append requested (list original)))
                        (puthash original (cons callback error-callback) callbacks)))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buffer &rest _)
                        (set-window-buffer (selected-window) buffer)
                        buffer))
                     ((symbol-function 'rimg--request-prepare)
-                     (lambda (&rest _)))
+                     (lambda (_session page-files)
+                       (push page-files prepared)))
                     ((symbol-function 'image-dired--line-up-with-method)
                      (lambda ()
                        (setq line-up-count (1+ line-up-count))
@@ -323,44 +328,48 @@
             (setq thumbnail-buffer
                   (rimg--display-gallery session dired-buffer files))
             (with-current-buffer thumbnail-buffer
-              (should (= image-dired-thumb-size rimg-thumbnail-size))
-              (should (= line-up-count 1))
-              (should (= image-dired--number-of-thumbnails 3))
-              (goto-char
-               (text-property-any (point-min) (point-max)
-                                  'original-file-name (nth 1 files)))
-              (should (equal (image-dired-original-file-name) (nth 1 files))))
-            ;; Network completion order must not become presentation order.
-            (funcall (car (gethash (nth 2 files) callbacks)) thumbnail-file)
-            (funcall (car (gethash (nth 1 files) callbacks)) thumbnail-file)
-            (with-current-buffer thumbnail-buffer
-              (should (= (point)
-                         (text-property-any (point-min) (point-max)
-                                            'original-file-name (nth 1 files))))
-              (should (= (seq-count
-                          (lambda (position)
-                            (get-text-property position 'rimg-thumbnail-pending))
-                          (number-sequence (point-min) (1- (point-max))))
-                         3)))
-            (funcall (car (gethash (nth 0 files) callbacks)) thumbnail-file)
-            (with-current-buffer thumbnail-buffer
-              (let (originals)
-                (save-excursion
-                  (goto-char (point-min))
-                  (while (not (eobp))
-                    (when (image-dired-image-at-point-p)
-                      (push (image-dired-original-file-name) originals))
-                    (forward-char 1)))
-                (should (equal (nreverse originals) files)))
-              (should-not (text-property-any
-                           (point-min) (point-max) 'rimg-thumbnail-pending t))
-              (should (= line-up-count 1))
-              (should (= rimg--gallery-pending 0))
-              (should (equal (image-dired-original-file-name) (nth 1 files)))
+              (let* ((window (selected-window))
+                     (range (rimg--gallery-visible-range window))
+                     (initial-end (cdr range))
+                     (last-visible (1- initial-end)))
+                (should (= image-dired-thumb-size rimg-thumbnail-size))
+                (should (= line-up-count 1))
+                (should (= image-dired--number-of-thumbnails rimg-page-size))
+                (should (= (length rimg--gallery-jobs) rimg-page-size))
+                (should (= (car range) 0))
+                (should (< initial-end rimg-page-size))
+                (should (equal requested (seq-subseq files 0 initial-end)))
+                (should (equal (car prepared) (seq-subseq files 0 initial-end)))
+                (should (= (point) (point-min)))
+                (should (= (window-start window) (point-min)))
+                (should (equal (image-dired-original-file-name) (car files)))
+                (let ((bottom-range
+                       (rimg--gallery-visible-range window (point-max))))
+                  (should (> (car bottom-range) 0))
+                  (should (= (cdr bottom-range) rimg-page-size)))
+                ;; A later response appears immediately in its own stable slot.
+                (funcall (car (gethash (nth last-visible files) callbacks))
+                         thumbnail-file)
+                (let ((position
+                       (text-property-any
+                        (point-min) (point-max)
+                        'original-file-name (nth last-visible files))))
+                  (should-not
+                   (get-text-property position 'rimg-thumbnail-pending)))
+                (should (equal (image-dired-original-file-name) (car files)))
+                ;; Scrolling schedules a cold region, without requesting the page.
+                (let* ((cold-index (min (1- rimg-page-size) (+ initial-end 2)))
+                       (cold-position
+                        (text-property-any
+                         (point-min) (point-max) 'rimg-gallery-slot cold-index)))
+                  (set-window-start window cold-position t)
+                  (rimg--gallery-window-scrolled window cold-position)
+                  (should (member (nth cold-index files) requested))
+                  (should (< (length requested) rimg-page-size)))
               (setq rimg--gallery-layout-width nil)
-              (rimg--gallery-window-size-changed (selected-window))
+              (rimg--gallery-window-size-changed window)
               (should (= line-up-count 2))
-              (should (equal (image-dired-original-file-name) (nth 1 files))))))
+              (should (equal (image-dired-original-file-name) (car files)))))))
       (set-window-buffer (selected-window) original-window-buffer)
       (when (buffer-live-p thumbnail-buffer)
         (kill-buffer thumbnail-buffer))
