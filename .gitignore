@@ -1,0 +1,8 @@
+*.elc
+*.eln
+*~
+.DS_Store
+coverage.out
+server/rimgd
+dist/*
+!dist/.gitkeep
