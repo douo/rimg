@@ -49,7 +49,9 @@ Add the Emacs client to your configuration:
 Open a single-hop remote `/ssh:` or `/sshx:` directory in Dired and invoke
 `M-x rimg-dired`. Gallery pages contain at most 200 images; `]` and `[` change
 pages, RET opens a bounded local preview, and `C-RET` explicitly opens the
-TRAMP original.
+TRAMP original. A page reserves its final thumbnail grid before network
+responses arrive. Fetches remain parallel, but visible results commit in file
+order and window resizing reflows the grid without changing the selected image.
 
 Maintenance commands are `M-x rimg-clear-local-cache`,
 `M-x rimg-prune-remote-cache`, `M-x rimg-reconnect`, and

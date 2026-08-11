@@ -141,6 +141,9 @@
 (defvar-local rimg--gallery-page-index 0)
 (defvar-local rimg--gallery-generation 0)
 (defvar-local rimg--gallery-pending 0)
+(defvar-local rimg--gallery-results nil)
+(defvar-local rimg--gallery-next-result 0)
+(defvar-local rimg--gallery-layout-width nil)
 
 (defvar rimg-thumbnail-mode-map
   (let ((map (make-sparse-keymap)))
@@ -548,15 +551,90 @@ remote command starts BINARY-PATH with CACHE-DIR."
   "Return the number of pages in the current rimg gallery."
   (/ (+ (length rimg--gallery-files) rimg-page-size -1) rimg-page-size))
 
+(defun rimg--gallery-cell-size ()
+  "Return the fixed pixel size reserved for one rimg thumbnail cell."
+  (+ rimg-thumbnail-size
+     (* 2 image-dired-thumb-relief)
+     (* 2 image-dired-thumb-margin)))
+
+(defun rimg--gallery-placeholder (index original dired-buffer)
+  "Return slot INDEX's stable placeholder for ORIGINAL from DIRED-BUFFER."
+  (let ((cell-size (rimg--gallery-cell-size)))
+    (propertize
+     " "
+     'display `(space :width (,cell-size) :height (,cell-size))
+     'image-dired-thumbnail t
+     'rimg-gallery-slot index
+     'rimg-thumbnail-pending t
+     'original-file-name original
+     'associated-dired-buffer dired-buffer
+     'help-echo (file-name-nondirectory original))))
+
+(defun rimg--gallery-line-up (window)
+  "Line up the current rimg gallery for WINDOW when its width changed."
+  (when (and (window-live-p window)
+             (eq (window-buffer window) (current-buffer)))
+    (let ((width (window-body-width window t)))
+      (unless (equal width rimg--gallery-layout-width)
+        (setq rimg--gallery-layout-width width)
+        (let* ((start (copy-marker (window-start window)))
+               (selected-original
+                (get-text-property (point) 'original-file-name))
+               (start-original
+                (get-text-property (window-start window) 'original-file-name)))
+          (unwind-protect
+              (progn
+                (save-excursion
+                  (image-dired--line-up-with-method))
+                (when selected-original
+                  (when-let* ((position
+                               (text-property-any
+                                (point-min) (point-max)
+                                'original-file-name selected-original)))
+                    (goto-char position)))
+                (if-let* ((position
+                           (and start-original
+                                (text-property-any
+                                 (point-min) (point-max)
+                                 'original-file-name start-original))))
+                    (set-window-start window position t)
+                  (set-window-start window start t)))
+            (set-marker start nil)))))))
+
+(defun rimg--gallery-window-size-changed (window)
+  "Reflow the current rimg gallery after WINDOW changes size."
+  (when rimg-thumbnail-mode
+    (rimg--gallery-line-up window)))
+
+(defun rimg--gallery-queue-result (buffer generation index commit)
+  "Queue COMMIT for INDEX in BUFFER's GENERATION and flush it in file order."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (= generation rimg--gallery-generation)
+                 (< index (length rimg--gallery-results)))
+        (let ((selected-original
+               (get-text-property (point) 'original-file-name)))
+          (aset rimg--gallery-results index commit)
+          (while-let ((next (and (< rimg--gallery-next-result
+                                    (length rimg--gallery-results))
+                                 (aref rimg--gallery-results
+                                       rimg--gallery-next-result))))
+            (aset rimg--gallery-results rimg--gallery-next-result nil)
+            (setq rimg--gallery-next-result (1+ rimg--gallery-next-result))
+            (funcall next))
+          (when selected-original
+            (when-let* ((position
+                         (text-property-any
+                          (point-min) (point-max)
+                          'original-file-name selected-original)))
+              (goto-char position))))))))
+
 (defun rimg--gallery-request-finished (buffer generation)
   "Record one completed request for BUFFER's GENERATION."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (= generation rimg--gallery-generation)
-        (setq rimg--gallery-pending (1- rimg--gallery-pending))
-        (when (and (zerop rimg--gallery-pending)
-                   (get-buffer-window buffer t))
-          (image-dired--line-up-with-method))))))
+        (setq rimg--gallery-pending (1- rimg--gallery-pending))))))
 
 (defun rimg--gallery-thumbnail-ready (buffer marker generation original
                                              dired-buffer thumbnail)
@@ -565,11 +643,10 @@ remote command starts BINARY-PATH with CACHE-DIR."
     (with-current-buffer buffer
       (when (= generation rimg--gallery-generation)
         (let ((inhibit-read-only t))
-          (goto-char marker)
-          (delete-char 1)
-          (image-dired-insert-thumbnail thumbnail original dired-buffer)
-          (setq image-dired--number-of-thumbnails
-                (1+ image-dired--number-of-thumbnails)))
+          (save-excursion
+            (goto-char marker)
+            (delete-char 1)
+            (image-dired-insert-thumbnail thumbnail original dired-buffer)))
         (set-marker marker nil)
         (rimg--gallery-request-finished buffer generation)))))
 
@@ -578,11 +655,17 @@ remote command starts BINARY-PATH with CACHE-DIR."
   (when (and (buffer-live-p buffer) (marker-buffer marker))
     (with-current-buffer buffer
       (when (= generation rimg--gallery-generation)
-        (let ((inhibit-read-only t))
-          (goto-char marker)
-          (delete-char 1)
-          (insert (propertize "!" 'face 'error
-                              'help-echo (error-message-string error-data))))
+        (let ((inhibit-read-only t)
+              (properties (text-properties-at marker)))
+          (save-excursion
+            (goto-char marker)
+            (delete-char 1)
+            (setq properties (plist-put properties 'rimg-thumbnail-pending nil)
+                  properties (plist-put properties 'rimg-thumbnail-error t)
+                  properties (plist-put properties 'face 'error)
+                  properties (plist-put properties 'help-echo
+                                        (error-message-string error-data)))
+            (insert (apply #'propertize "!" properties))))
         (set-marker marker nil)
         (rimg--gallery-request-finished buffer generation)))))
 
@@ -594,30 +677,62 @@ remote command starts BINARY-PATH with CACHE-DIR."
             generation rimg--gallery-generation)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (setq image-dired--number-of-thumbnails 0)
         (setq page-files (rimg--gallery-page-files)
               session rimg--gallery-session)
-        (dolist (original page-files)
-          (let ((marker (copy-marker (point))))
-            (insert (propertize " " 'rimg-thumbnail-pending t) " ")
-            (push (cons marker original) jobs))))
+        (setq-local image-dired-thumbnail-storage 'image-dired)
+        (setq-local image-dired-thumb-size rimg-thumbnail-size)
+        (setq-local image-dired-line-up-method 'dynamic)
+        (setq image-dired--number-of-thumbnails (length page-files)
+              rimg--gallery-results (make-vector (length page-files) nil)
+              rimg--gallery-next-result 0
+              rimg--gallery-layout-width nil)
+        (cl-loop for original in page-files
+                 for index from 0
+                 do
+                 (insert (rimg--gallery-placeholder
+                          index original rimg--gallery-dired-buffer)
+                         " ")
+                 (push (list index original) jobs)))
       (setq jobs (nreverse jobs)
             rimg--gallery-pending (length jobs)))
     (pop-to-buffer buffer)
+    (when-let* ((window (get-buffer-window buffer t)))
+      (with-current-buffer buffer
+        (rimg--gallery-line-up window)))
+    ;; Create markers only after the initial layout.  Image-Dired deletes and
+    ;; reinserts separators while lining up, which can move earlier markers.
+    (with-current-buffer buffer
+      (setq jobs
+            (mapcar
+             (lambda (job)
+               (pcase-let ((`(,index ,original) job))
+                 (let ((position
+                        (text-property-any
+                         (point-min) (point-max) 'rimg-gallery-slot index)))
+                   (unless position
+                     (error "rimg: gallery slot %d disappeared during layout"
+                            index))
+                   (list index (copy-marker position) original))))
+             jobs)))
     (dolist (job jobs)
-      (let ((marker (car job))
-            (original (cdr job)))
+      (pcase-let ((`(,index ,marker ,original) job))
         (rimg--request-thumbnail
          (buffer-local-value 'rimg--gallery-session buffer)
          original
          (lambda (thumbnail)
-           (rimg--gallery-thumbnail-ready
-            buffer marker generation original
-            (buffer-local-value 'rimg--gallery-dired-buffer buffer)
-            thumbnail))
+           (rimg--gallery-queue-result
+            buffer generation index
+            (lambda ()
+              (rimg--gallery-thumbnail-ready
+               buffer marker generation original
+               (buffer-local-value 'rimg--gallery-dired-buffer buffer)
+               thumbnail))))
          (lambda (error-data)
-           (rimg--gallery-thumbnail-error
-            buffer marker generation error-data)))))
+           (rimg--gallery-queue-result
+            buffer generation index
+            (lambda ()
+              (rimg--gallery-thumbnail-error
+               buffer marker generation error-data)))))))
     (when (and page-files
                (or (null (rimg--session-capabilities session))
                    (alist-get 'prepare (rimg--session-capabilities session))))
@@ -632,7 +747,9 @@ remote command starts BINARY-PATH with CACHE-DIR."
             rimg--gallery-dired-buffer dired-buffer
             rimg--gallery-files files
             rimg--gallery-page-index 0)
-      (rimg-thumbnail-mode 1))
+      (rimg-thumbnail-mode 1)
+      (add-hook 'window-size-change-functions
+                #'rimg--gallery-window-size-changed nil t))
     (rimg--render-gallery-page buffer)))
 
 (defun rimg-next-page ()
