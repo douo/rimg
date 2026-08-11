@@ -32,9 +32,9 @@ Representative run for `sample.jpg`:
 ```text
 original_bytes=100356
 thumbnail_body_bytes=8953
-cold_seconds=0.098579
-remote_warm_seconds=0.035073
-local_warm_seconds=0.029016
+cold_seconds=0.118631
+remote_warm_seconds=0.032821
+local_warm_seconds=0.029246
 local_warm_body_writes=0
 ```
 
