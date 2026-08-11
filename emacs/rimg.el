@@ -30,6 +30,8 @@
 
 (defconst rimg-server-version "0.1.0")
 (defconst rimg-protocol-version 1)
+(defconst rimg-supported-tramp-methods '("ssh" "sshx")
+  "Single-hop TRAMP methods supported by rimg.")
 
 (define-error 'rimg-protocol-error "rimg protocol error")
 
@@ -191,7 +193,7 @@
   (let* ((parsed (tramp-dissect-file-name path))
          (method (tramp-file-name-method parsed))
          (hop (tramp-file-name-hop parsed)))
-    (unless (equal method "ssh")
+    (unless (member method rimg-supported-tramp-methods)
       (user-error "rimg: remote method %s is not supported by the MVP" method))
     (when hop
       (user-error "rimg: multi-hop SSH is not supported by the MVP"))

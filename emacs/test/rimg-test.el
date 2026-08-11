@@ -48,6 +48,15 @@
     (should (equal (rimg--remote-identity first)
                    (rimg--remote-identity second)))))
 
+(ert-deftest rimg-remote-detection-supports-single-hop-sshx ()
+  (let ((remote (rimg--remote-from-path
+                 "/sshx:example-host:/srv/images/")))
+    (should (equal (rimg--remote-method remote) "sshx"))
+    (should (equal (rimg--remote-host remote) "example-host"))
+    (should (equal (rimg--remote-prefix remote) "/sshx:example-host:"))
+    (should (equal (rimg--remote-localname remote)
+                   "/srv/images/"))))
+
 (ert-deftest rimg-remote-detection-rejects-unsupported-paths ()
   (should-error (rimg--remote-from-path "/tmp/images/") :type 'user-error)
   (should-error (rimg--remote-from-path "/sudo::/tmp/images/") :type 'user-error)

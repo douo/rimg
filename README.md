@@ -46,9 +46,10 @@ Add the Emacs client to your configuration:
 (require 'rimg)
 ```
 
-Open a remote `/ssh:` directory in Dired and invoke `M-x rimg-dired`. Gallery
-pages contain at most 200 images; `]` and `[` change pages, RET opens a bounded
-local preview, and `C-RET` explicitly opens the TRAMP original.
+Open a single-hop remote `/ssh:` or `/sshx:` directory in Dired and invoke
+`M-x rimg-dired`. Gallery pages contain at most 200 images; `]` and `[` change
+pages, RET opens a bounded local preview, and `C-RET` explicitly opens the
+TRAMP original.
 
 Maintenance commands are `M-x rimg-clear-local-cache`,
 `M-x rimg-prune-remote-cache`, `M-x rimg-reconnect`, and
