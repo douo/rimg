@@ -11,8 +11,8 @@ for tag or comment lookup?
 ## Planned Fixture
 
 - Local thumbnail: generated under a temporary local directory.
-- Remote original:
-  `/ssh:example-host:/srv/images/sample.jpg`
+- Remote original: provided through `RIMG_PHASE0_REMOTE_ORIGINAL`, for example
+  `/ssh:example-host:/srv/images/sample.jpg`.
 - Emacs: GNU Emacs 32.0.50.
 
 ## Required Evidence
@@ -30,7 +30,7 @@ The stock `image-dired-insert-thumbnail` seam is usable for the MVP.
 The repeatable harness in `emacs/test/rimg-phase0-test.el` uses:
 
 - A generated local JPEG thumbnail.
-- A real remote Dired buffer on `example-host`.
+- A real remote Dired buffer supplied by the test operator.
 - A remote original stored in the thumbnail's `original-file-name` property.
 - Advice around `tramp-file-name-handler` only during thumbnail insertion.
 
@@ -62,7 +62,8 @@ No architecture deviation is required.
 ## Reproduction
 
 ```sh
-./scripts/test-phase0.sh
+RIMG_PHASE0_REMOTE_ORIGINAL=/ssh:example-host:/srv/images/sample.jpg \
+  ./scripts/test-phase0.sh
 ```
 
 Observed result:

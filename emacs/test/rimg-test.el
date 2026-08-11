@@ -36,6 +36,13 @@
   (let ((default-directory (rimg--remote-file-name remote "~/")))
     (zerop (process-file "test" nil nil nil "-S" socket-path))))
 
+(defun rimg-test--e2e-fixture (remote-directory)
+  "Return an image fixture under REMOTE-DIRECTORY for opt-in E2E tests."
+  (or (getenv "RIMG_E2E_IMAGE")
+      (car (directory-files
+            remote-directory t "\\.\\(?:jpe?g\\|png\\|webp\\)\\'" t))
+      (ert-fail "RIMG_E2E_REMOTE contains no supported image fixture")))
+
 (ert-deftest rimg-remote-identity-is-stable-per-ssh-target ()
   (let ((first (rimg--remote-from-path
                 "/ssh:alice@example:/data/outputs/a/"))
@@ -687,8 +694,7 @@
     (let* ((remote (rimg--remote-from-path remote-directory))
            (first-sessions (make-hash-table :test #'equal))
            (second-sessions (make-hash-table :test #'equal))
-           (fixture
-            (expand-file-name "sample.jpg" remote-directory))
+           (fixture (rimg-test--e2e-fixture remote-directory))
            first second)
       (unwind-protect
           (progn
@@ -784,9 +790,8 @@
     (let* ((rimg--sessions (make-hash-table :test #'equal))
            (remote (rimg--remote-from-path remote-directory))
            (fixture
-            (file-remote-p
-             (expand-file-name "sample.jpg" remote-directory)
-             'localname))
+            (file-remote-p (rimg-test--e2e-fixture remote-directory)
+                           'localname))
            (temporary-directory
             (rimg--remote-process-output
              remote "mktemp" "-d" "/tmp/rimg-e2e-XXXXXXXX"))
@@ -827,8 +832,7 @@
            (rimg--sessions (make-hash-table :test #'equal))
            (rimg-local-cache-directory (expand-file-name "cache/" temp-root))
            (remote (rimg--remote-from-path remote-directory))
-           (fixture
-            (expand-file-name "sample.jpg" remote-directory))
+           (fixture (rimg-test--e2e-fixture remote-directory))
            (original-store (symbol-function 'rimg--store-local-thumbnail))
            body-writes session)
       (unwind-protect

@@ -7,11 +7,9 @@
 (require 'image-dired-tags)
 (require 'tramp)
 
-(defconst rimg-phase0-test-remote-directory
-  "/ssh:example-host:/srv/images/")
-
 (defconst rimg-phase0-test-remote-original
-  (concat rimg-phase0-test-remote-directory "sample.jpg"))
+  (getenv "RIMG_PHASE0_REMOTE_ORIGINAL")
+  "Opt-in TRAMP image fixture used by the real-host integration test.")
 
 (defvar rimg-phase0-test--tramp-operations nil)
 
@@ -29,7 +27,11 @@
 
 (ert-deftest rimg-phase0-local-thumb-retains-remote-original ()
   "Verify the stock Image-Dired insertion seam with a real TRAMP original."
-  (let* ((thumb-file (or (getenv "RIMG_PHASE0_THUMB")
+  (let* ((remote-original
+          (or rimg-phase0-test-remote-original
+              (ert-skip "RIMG_PHASE0_REMOTE_ORIGINAL is not set")))
+         (remote-directory (file-name-directory remote-original))
+         (thumb-file (or (getenv "RIMG_PHASE0_THUMB")
                          (ert-skip "RIMG_PHASE0_THUMB is not set")))
          (temp-root (make-temp-file "rimg-phase0-emacs-" t))
          (image-dired-dir (expand-file-name "image-dired/" temp-root))
@@ -46,9 +48,9 @@
     (unwind-protect
         (progn
           (should (file-exists-p thumb-file))
-          (setq dired-buffer (dired-noselect rimg-phase0-test-remote-directory))
+          (setq dired-buffer (dired-noselect remote-directory))
           (with-current-buffer dired-buffer
-            (should (dired-goto-file rimg-phase0-test-remote-original)))
+            (should (dired-goto-file remote-original)))
 
           (setq thumbnail-buffer (image-dired-create-thumbnail-buffer))
           (with-current-buffer thumbnail-buffer
@@ -60,7 +62,7 @@
               (unwind-protect
                   (let ((insertion-started-at (float-time)))
                     (image-dired-insert-thumbnail
-                     thumb-file rimg-phase0-test-remote-original dired-buffer)
+                     thumb-file remote-original dired-buffer)
                     (setq insertion-seconds
                           (- (float-time) insertion-started-at)))
                 (advice-remove 'tramp-file-name-handler
@@ -68,7 +70,7 @@
               (goto-char (point-min))
               (should (image-dired-image-at-point-p))
               (should (equal (image-dired-original-file-name)
-                             rimg-phase0-test-remote-original))
+                             remote-original))
               (should (eq (image-dired-associated-dired-buffer) dired-buffer))
               ;; Current Image-Dired represents an empty tag set as ("").
               (should (equal (get-text-property (point) 'tags) '("")))
@@ -78,16 +80,16 @@
                          (lambda (file &optional _ignored)
                            (setq displayed-file file))))
                 (image-dired-display-this))
-              (should (equal displayed-file rimg-phase0-test-remote-original))
+              (should (equal displayed-file remote-original))
 
               (image-dired-mark-thumb-original-file)
               (should (eq (rimg-phase0-test--dired-mark-at-file
-                           dired-buffer rimg-phase0-test-remote-original)
+                           dired-buffer remote-original)
                           ?*))
               (goto-char (point-min))
               (image-dired-unmark-thumb-original-file)
               (should (eq (rimg-phase0-test--dired-mark-at-file
-                           dired-buffer rimg-phase0-test-remote-original)
+                           dired-buffer remote-original)
                           ?\s))))
 
           (should-not rimg-phase0-test--tramp-operations)
@@ -98,7 +100,7 @@
             insertion-seconds
             (- (float-time) started-at)
             (nreverse rimg-phase0-test--tramp-operations)
-            rimg-phase0-test-remote-original)))
+            remote-original)))
       (when (buffer-live-p thumbnail-buffer)
         (kill-buffer thumbnail-buffer))
       (when (buffer-live-p dired-buffer)

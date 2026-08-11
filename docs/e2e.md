@@ -2,12 +2,16 @@
 
 Verification date: 2026-08-11 (Asia/Shanghai)
 
-Fixture host and directory:
+The measurements below were collected on a private Linux amd64 fixture host.
+Host aliases, user names, and source paths are intentionally omitted. Public
+reproduction uses an operator-provided TRAMP directory:
 
 ```text
-example-host (Linux amd64)
-/srv/images/
+RIMG_E2E_REMOTE=/ssh:example-host:/srv/images/
 ```
+
+Tests that need one source image select the first supported image in that
+directory. Set `RIMG_E2E_IMAGE` to a full TRAMP path to choose one explicitly.
 
 ## Results
 
@@ -27,7 +31,7 @@ example-host (Linux amd64)
 
 ## Measurements
 
-Representative run for `sample.jpg`:
+Representative run for a JPEG fixture:
 
 ```text
 original_bytes=100356
