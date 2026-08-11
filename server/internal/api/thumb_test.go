@@ -130,6 +130,99 @@ func TestThumbnailRequestDecodesWebPInput(t *testing.T) {
 	}
 }
 
+func TestPreviewRequestReturnsBoundedProxyWithSeparateCacheIdentity(t *testing.T) {
+	tempDir := t.TempDir()
+	original := filepath.Join(tempDir, "original.jpg")
+	writeJPEGFixture(t, original, 400, 200)
+	handler := api.NewHandler(api.Options{CacheDir: filepath.Join(tempDir, "cache")})
+	previewBody := map[string]any{
+		"path": original, "max_width": 150, "max_height": 100,
+		"format": "jpeg", "quality": 88,
+	}
+
+	first := performJSONRequest(t, handler, http.MethodPost, "/v1/preview", previewBody)
+	if first.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200: %s", first.Code, first.Body.String())
+	}
+	if got := first.Header().Get("X-Rimg-Cache"); got != "MISS" {
+		t.Fatalf("first preview cache status = %q, want MISS", got)
+	}
+	config, err := jpeg.DecodeConfig(bytes.NewReader(first.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if config.Width != 150 || config.Height != 75 {
+		t.Fatalf("preview dimensions = %dx%d, want 150x75", config.Width, config.Height)
+	}
+
+	thumbnail := performJSONRequest(t, handler, http.MethodPost, "/v1/thumb", map[string]any{
+		"path": original, "width": 150, "height": 100,
+		"fit": "contain", "format": "jpeg", "quality": 88,
+	})
+	if thumbnail.Code != http.StatusOK {
+		t.Fatalf("thumbnail status = %d: %s", thumbnail.Code, thumbnail.Body.String())
+	}
+	if first.Header().Get("X-Rimg-Key") == thumbnail.Header().Get("X-Rimg-Key") {
+		t.Fatal("preview and thumbnail unexpectedly share a cache key")
+	}
+
+	second := performJSONRequest(t, handler, http.MethodPost, "/v1/preview", previewBody)
+	if got := second.Header().Get("X-Rimg-Cache"); got != "HIT" {
+		t.Fatalf("second preview cache status = %q, want HIT", got)
+	}
+	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
+		t.Fatal("cached preview differs from generated preview")
+	}
+}
+
+func TestPrepareReportsCachedAndQueuesMissingThumbnails(t *testing.T) {
+	tempDir := t.TempDir()
+	firstPath := filepath.Join(tempDir, "first.jpg")
+	secondPath := filepath.Join(tempDir, "second.jpg")
+	writeJPEGFixture(t, firstPath, 80, 40)
+	writeJPEGFixture(t, secondPath, 80, 40)
+	handler := api.NewHandler(api.Options{
+		CacheDir: filepath.Join(tempDir, "cache"), PrepareWorkers: 1,
+	})
+	thumbnail := map[string]any{
+		"width": 32, "height": 32, "format": "jpeg", "quality": 82,
+	}
+	warm := performJSONRequest(t, handler, http.MethodPost, "/v1/thumb", map[string]any{
+		"path": firstPath, "width": 32, "height": 32,
+		"fit": "contain", "format": "jpeg", "quality": 82,
+	})
+	if warm.Code != http.StatusOK {
+		t.Fatalf("warm status = %d: %s", warm.Code, warm.Body.String())
+	}
+
+	prepared := performJSONRequest(t, handler, http.MethodPost, "/v1/prepare", map[string]any{
+		"files": []string{firstPath, secondPath}, "thumbnail": thumbnail,
+	})
+	if prepared.Code != http.StatusOK {
+		t.Fatalf("prepare status = %d, want 200: %s", prepared.Code, prepared.Body.String())
+	}
+	var result struct {
+		Accepted int `json:"accepted"`
+		Cached   int `json:"cached"`
+		Queued   int `json:"queued"`
+	}
+	if err := json.Unmarshal(prepared.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode prepare response: %v", err)
+	}
+	if result.Accepted != 2 || result.Cached != 1 || result.Queued != 1 {
+		t.Fatalf("prepare result = %+v, want accepted=2 cached=1 queued=1", result)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	visible := performJSONRequest(t, handler, http.MethodPost, "/v1/thumb", map[string]any{
+		"path": secondPath, "width": 32, "height": 32,
+		"fit": "contain", "format": "jpeg", "quality": 82,
+	})
+	if got := visible.Header().Get("X-Rimg-Cache"); got != "HIT" {
+		t.Fatalf("prepared thumbnail cache status = %q, want HIT", got)
+	}
+}
+
 func TestThumbnailRequestDecodesAndEncodesPNG(t *testing.T) {
 	tempDir := t.TempDir()
 	original := filepath.Join(tempDir, "original.png")

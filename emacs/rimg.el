@@ -62,6 +62,14 @@
   "Persistent cache directory on each remote rimgd host."
   :type 'string)
 
+(defcustom rimg-remote-cache-max-age-days 30
+  "Maximum age retained by `rimg-prune-remote-cache', in days."
+  :type 'integer)
+
+(defcustom rimg-remote-cache-max-size-bytes (* 10 1024 1024 1024)
+  "Maximum remote thumbnail cache size retained by the prune command."
+  :type 'integer)
+
 (defcustom rimg-connect-timeout 5.0
   "Seconds to wait for rimgd health after SSH starts."
   :type 'number)
@@ -72,6 +80,18 @@
 
 (defcustom rimg-thumbnail-jpeg-quality 82
   "JPEG quality requested for generated thumbnails."
+  :type 'integer)
+
+(defcustom rimg-preview-max-width 1920
+  "Maximum width of generated preview proxies."
+  :type 'integer)
+
+(defcustom rimg-preview-max-height 1920
+  "Maximum height of generated preview proxies."
+  :type 'integer)
+
+(defcustom rimg-preview-jpeg-quality 88
+  "JPEG quality requested for generated preview proxies."
   :type 'integer)
 
 (defcustom rimg-http-parallelism 6
@@ -124,6 +144,8 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "]") #'rimg-next-page)
     (define-key map (kbd "[") #'rimg-previous-page)
+    (define-key map (kbd "RET") #'rimg-open-preview)
+    (define-key map (kbd "C-<return>") #'rimg-open-original)
     map)
   "Keymap enabled in Image-Dired buffers managed by rimg.")
 
@@ -270,11 +292,16 @@ remote command starts BINARY-PATH with CACHE-DIR."
            ("jpeg" ".jpg")
            ("png" ".png")
            (_ (error "rimg: unsupported local thumbnail format: %s" format))))
-        (identity-hash
-         (secure-hash 'sha256 (rimg--remote-identity remote))))
+        (remote-directory (rimg--local-remote-cache-directory remote)))
     (expand-file-name
-     (format "%s/%s/%s%s" identity-hash (substring key 0 2) key extension)
-     rimg-local-cache-directory)))
+     (format "%s/%s%s" (substring key 0 2) key extension)
+     remote-directory)))
+
+(defun rimg--local-remote-cache-directory (remote)
+  "Return the local cache partition directory for REMOTE."
+  (expand-file-name
+   (secure-hash 'sha256 (rimg--remote-identity remote))
+   rimg-local-cache-directory))
 
 (defun rimg--write-local-file-atomically (path data)
   "Write DATA to local PATH atomically and return PATH."
@@ -297,25 +324,26 @@ remote command starts BINARY-PATH with CACHE-DIR."
   (rimg--write-local-file-atomically
    (rimg--local-thumbnail-path remote key format) data))
 
-(defun rimg--local-reference-path (remote original-localname)
+(defun rimg--local-reference-path (remote original-localname &optional transform)
   "Return the cache reference path for REMOTE ORIGINAL-LOCALNAME and thumb spec."
-  (let* ((identity-hash
-          (secure-hash 'sha256 (rimg--remote-identity remote)))
-         (request-key
+  (let* ((request-key
           (secure-hash
            'sha256
-           (format "%s\0thumb:%dx%d:contain:jpeg:q%d"
+           (format "%s\0%s"
                    original-localname
-                   rimg-thumbnail-size rimg-thumbnail-size
-                   rimg-thumbnail-jpeg-quality))))
+                   (or transform
+                       (format "thumb:%dx%d:contain:jpeg:q%d"
+                               rimg-thumbnail-size rimg-thumbnail-size
+                               rimg-thumbnail-jpeg-quality))))))
     (expand-file-name
-     (format "%s/refs/%s/%s" identity-hash
-             (substring request-key 0 2) request-key)
-     rimg-local-cache-directory)))
+     (format "refs/%s/%s" (substring request-key 0 2) request-key)
+     (rimg--local-remote-cache-directory remote))))
 
-(defun rimg--cached-local-thumbnail (remote original-localname)
+(defun rimg--cached-local-thumbnail (remote original-localname
+                                            &optional transform)
   "Return (KEY . PATH) for REMOTE ORIGINAL-LOCALNAME when its local cache exists."
-  (let ((reference (rimg--local-reference-path remote original-localname)))
+  (let ((reference
+         (rimg--local-reference-path remote original-localname transform)))
     (when (file-readable-p reference)
       (let ((key
              (with-temp-buffer
@@ -422,6 +450,90 @@ remote command starts BINARY-PATH with CACHE-DIR."
        (list remote "jpeg" reference-path cached callback error-callback)
        t t))))
 
+(defun rimg--request-preview (session original-file callback
+                                      &optional error-callback)
+  "Request a bounded preview for ORIGINAL-FILE and call CALLBACK with its path."
+  (unless (rimg--session-live-ready-p session)
+    (error "rimg: preview request requires a ready session"))
+  (let* ((remote (rimg--session-remote session))
+         (original-remote (rimg--remote-from-path original-file)))
+    (unless (equal (rimg--remote-identity remote)
+                   (rimg--remote-identity original-remote))
+      (error "rimg: original file belongs to a different remote"))
+    (let* ((original-localname (rimg--remote-localname original-remote))
+           (transform
+            (format "preview:%dx%d:contain:jpeg:q%d"
+                    rimg-preview-max-width rimg-preview-max-height
+                    rimg-preview-jpeg-quality))
+           (reference-path
+            (rimg--local-reference-path remote original-localname transform))
+           (cached
+            (rimg--cached-local-thumbnail remote original-localname transform))
+           (url-request-method "POST")
+           (url-request-extra-headers
+            (append
+             '(("Content-Type" . "application/json"))
+             (when cached
+               `(("If-None-Match" . ,(format "\"%s\"" (car cached)))))))
+           (url-request-data
+            (json-serialize
+             `((path . ,original-localname)
+               (max_width . ,rimg-preview-max-width)
+               (max_height . ,rimg-preview-max-height)
+               (format . "jpeg")
+               (quality . ,rimg-preview-jpeg-quality)))))
+      (setq url-queue-parallel-processes rimg-http-parallelism)
+      (url-queue-retrieve
+       (format "http://127.0.0.1:%d/v1/preview"
+               (rimg--session-local-port session))
+       #'rimg--thumbnail-response
+       (list remote "jpeg" reference-path cached callback error-callback)
+       t t))))
+
+(defun rimg--prepare-response (status)
+  "Consume a queued prepare response described by STATUS."
+  (let ((response-buffer (current-buffer)))
+    (unwind-protect
+        (condition-case error-data
+            (progn
+              (when-let* ((transport-error (plist-get status :error)))
+                (error "rimg: prepare transport failed: %s" transport-error))
+              (unless (equal url-http-response-status 200)
+                (error "rimg: prepare returned HTTP %s"
+                       url-http-response-status)))
+          (error
+           (message "%s" (error-message-string error-data))))
+      (when (buffer-live-p response-buffer)
+        (kill-buffer response-buffer)))))
+
+(defun rimg--request-prepare (session files)
+  "Queue remote thumbnail preparation for FILES through SESSION."
+  (unless (rimg--session-live-ready-p session)
+    (error "rimg: prepare requires a ready session"))
+  (let ((remote (rimg--session-remote session)) localnames)
+    (dolist (file files)
+      (let ((file-remote (rimg--remote-from-path file)))
+        (unless (equal (rimg--remote-identity remote)
+                       (rimg--remote-identity file-remote))
+          (error "rimg: prepare file belongs to a different remote"))
+        (push (rimg--remote-localname file-remote) localnames)))
+    (let ((url-request-method "POST")
+          (url-request-extra-headers
+           '(("Content-Type" . "application/json")))
+          (url-request-data
+           (json-serialize
+            `((files . ,(vconcat (nreverse localnames)))
+              (thumbnail
+               . ((width . ,rimg-thumbnail-size)
+                  (height . ,rimg-thumbnail-size)
+                  (format . "jpeg")
+                  (quality . ,rimg-thumbnail-jpeg-quality)))))))
+      (setq url-queue-parallel-processes rimg-http-parallelism)
+      (url-queue-retrieve
+       (format "http://127.0.0.1:%d/v1/prepare"
+               (rimg--session-local-port session))
+       #'rimg--prepare-response nil t t))))
+
 (defun rimg--gallery-page-files ()
   "Return the files for the current rimg gallery page."
   (let* ((start (* rimg--gallery-page-index rimg-page-size))
@@ -474,14 +586,16 @@ remote command starts BINARY-PATH with CACHE-DIR."
 
 (defun rimg--render-gallery-page (buffer)
   "Render BUFFER's current rimg gallery page."
-  (let (jobs generation)
+  (let (jobs generation page-files session)
     (with-current-buffer buffer
       (setq rimg--gallery-generation (1+ rimg--gallery-generation)
             generation rimg--gallery-generation)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (setq image-dired--number-of-thumbnails 0)
-        (dolist (original (rimg--gallery-page-files))
+        (setq page-files (rimg--gallery-page-files)
+              session rimg--gallery-session)
+        (dolist (original page-files)
           (let ((marker (copy-marker (point))))
             (insert (propertize " " 'rimg-thumbnail-pending t) " ")
             (push (cons marker original) jobs))))
@@ -502,6 +616,10 @@ remote command starts BINARY-PATH with CACHE-DIR."
          (lambda (error-data)
            (rimg--gallery-thumbnail-error
             buffer marker generation error-data)))))
+    (when (and page-files
+               (or (null (rimg--session-capabilities session))
+                   (alist-get 'prepare (rimg--session-capabilities session))))
+      (rimg--request-prepare session page-files))
     buffer))
 
 (defun rimg--display-gallery (session dired-buffer files)
@@ -838,6 +956,79 @@ remote command starts BINARY-PATH with CACHE-DIR."
       (user-error "rimg: current Dired listing contains no images"))
     (rimg--display-gallery
      (rimg--connect-remote remote) dired-buffer files)))
+
+(defun rimg-open-preview ()
+  "Display a bounded local preview for the rimg thumbnail at point."
+  (interactive nil image-dired-thumbnail-mode)
+  (unless (and rimg-thumbnail-mode rimg--gallery-session)
+    (user-error "rimg: this is not an rimg gallery"))
+  (let ((original (image-dired-original-file-name)))
+    (unless original
+      (user-error "rimg: no thumbnail at point"))
+    (rimg--request-preview
+     rimg--gallery-session original
+     #'image-dired-display-image
+     (lambda (error-data)
+       (message "%s" (error-message-string error-data))))))
+
+(defun rimg-open-original ()
+  "Explicitly display the TRAMP original for the rimg thumbnail at point."
+  (interactive nil image-dired-thumbnail-mode)
+  (let ((original (image-dired-original-file-name)))
+    (unless original
+      (user-error "rimg: no thumbnail at point"))
+    (image-dired-display-image original)))
+
+(defun rimg--current-remote ()
+  "Return the rimg remote associated with the current buffer."
+  (cond
+   ((and rimg-thumbnail-mode rimg--gallery-session)
+    (rimg--session-remote rimg--gallery-session))
+   ((tramp-tramp-file-p default-directory)
+    (rimg--remote-from-path default-directory))
+   (t
+    (user-error "rimg: current buffer is not associated with a remote"))))
+
+(defun rimg-clear-local-cache ()
+  "Clear the local rimg cache partition for the current remote."
+  (interactive)
+  (let* ((remote (rimg--current-remote))
+         (directory (rimg--local-remote-cache-directory remote)))
+    (when (file-directory-p directory)
+      (delete-directory directory t))
+    (message "rimg: cleared local cache for %s" (rimg--remote-host remote))))
+
+(defun rimg--current-session ()
+  "Return or establish the rimg session associated with the current buffer."
+  (if (and rimg-thumbnail-mode rimg--gallery-session)
+      rimg--gallery-session
+    (let* ((remote (rimg--current-remote))
+           (session (gethash (rimg--remote-identity remote) rimg--sessions)))
+      (if (rimg--session-live-ready-p session)
+          session
+        (rimg--connect-remote remote)))))
+
+(defun rimg-prune-remote-cache ()
+  "Prune the persistent rimgd cache for the current remote."
+  (interactive)
+  (let* ((session (rimg--current-session))
+         (remote (rimg--session-remote session))
+         (output
+          (rimg--remote-process-output
+           remote
+           (rimg--session-binary-path session)
+           "prune"
+           "--cache-dir" (rimg--session-cache-dir session)
+           "--max-age" (format "%dh" (* rimg-remote-cache-max-age-days 24))
+           "--max-size-bytes" (number-to-string
+                                rimg-remote-cache-max-size-bytes)
+           "--json"))
+         (result (json-parse-string output :object-type 'alist)))
+    (message "rimg: pruned %s files (%s bytes) on %s"
+             (alist-get 'removed_files result)
+             (alist-get 'freed_bytes result)
+             (rimg--remote-host remote))
+    result))
 
 (provide 'rimg)
 

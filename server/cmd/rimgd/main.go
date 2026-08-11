@@ -94,13 +94,14 @@ func runServe(arguments []string) {
 	flags.SetOutput(os.Stderr)
 	socketPath := flags.String("socket", "", "Unix socket path")
 	cacheDir := flags.String("cache-dir", "", "persistent cache directory")
+	prepareWorkers := flags.Int("prepare-workers", 0, "prepare worker count (0 uses default)")
 	exitOnStdinEOF := flags.Bool(
 		"exit-on-stdin-eof", false, "stop serving when standard input closes",
 	)
 	if err := flags.Parse(arguments); err != nil {
 		os.Exit(2)
 	}
-	if flags.NArg() != 0 || *socketPath == "" || *cacheDir == "" {
+	if flags.NArg() != 0 || *socketPath == "" || *cacheDir == "" || *prepareWorkers < 0 {
 		fmt.Fprintln(os.Stderr, "usage: rimgd serve --socket PATH --cache-dir PATH")
 		os.Exit(2)
 	}
@@ -122,7 +123,9 @@ func runServe(arguments []string) {
 	if err := rimgserver.Serve(ctx, rimgserver.Options{
 		SocketPath: *socketPath,
 		CacheDir:   *cacheDir,
-		Handler:    api.NewHandler(api.Options{CacheDir: *cacheDir}),
+		Handler: api.NewHandler(api.Options{
+			CacheDir: *cacheDir, PrepareWorkers: *prepareWorkers,
+		}),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "rimgd: serve: %v\n", err)
 		os.Exit(1)

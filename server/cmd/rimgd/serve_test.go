@@ -126,8 +126,8 @@ func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(
 	if got := fmt.Sprint(health.Capabilities.Encode); got != "[jpeg png]" {
 		t.Fatalf("encode capabilities = %s", got)
 	}
-	if health.Capabilities.Prepare {
-		t.Fatal("prepare capability is true before /v1/prepare is implemented")
+	if !health.Capabilities.Prepare {
+		t.Fatal("prepare capability is false")
 	}
 
 	info, err := os.Stat(socket)

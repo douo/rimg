@@ -22,6 +22,7 @@ var (
 )
 
 type Spec struct {
+	Kind    string
 	Width   int
 	Height  int
 	Fit     string
@@ -36,8 +37,12 @@ type Output struct {
 }
 
 func (spec Spec) TransformID() string {
-	return fmt.Sprintf("thumb:%dx%d:%s:%s:q%d",
-		spec.Width, spec.Height, spec.Fit, spec.Format, spec.Quality)
+	kind := spec.Kind
+	if kind == "" {
+		kind = "thumb"
+	}
+	return fmt.Sprintf("%s:%dx%d:%s:%s:q%d",
+		kind, spec.Width, spec.Height, spec.Fit, spec.Format, spec.Quality)
 }
 
 func TransformFile(path string, spec Spec) (Output, error) {

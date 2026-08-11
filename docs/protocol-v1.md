@@ -28,7 +28,7 @@ through an OpenSSH local forward bound to `127.0.0.1` on an ephemeral port.
   "capabilities": {
     "decode": ["jpeg", "png", "webp"],
     "encode": ["jpeg", "png"],
-    "prepare": false
+    "prepare": true
   }
 }
 ```
@@ -72,8 +72,8 @@ returns a bounded proxy image. It never returns arbitrary original bytes.
 
 `POST /v1/prepare` accepts at most 1000 paths and a thumbnail specification.
 It schedules cache population on a bounded worker pool and returns accepted,
-cached, and queued counts. This endpoint is planned for Phase 4; until it is
-implemented, health reports `"prepare": false`.
+cached, and queued counts. The default worker count is
+`min(runtime.NumCPU(), 8)` and can be overridden when starting rimgd.
 
 ## Error Codes
 

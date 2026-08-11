@@ -34,27 +34,43 @@ func (store *Store) GetOrCreate(
 	extension string,
 	generate func() ([]byte, error),
 ) (Result, error) {
-	key, err := sourceKey(sourcePath, transform)
+	lookup, found, err := store.Lookup(sourcePath, transform, extension)
 	if err != nil {
 		return Result{}, err
+	}
+	if found {
+		return lookup, nil
+	}
+
+	data, err := generate()
+	if err != nil {
+		return Result{}, err
+	}
+	if err := writeAtomically(lookup.Path, data); err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrCache, err)
+	}
+	lookup.Data = data
+	return lookup, nil
+}
+
+func (store *Store) Lookup(
+	sourcePath string,
+	transform string,
+	extension string,
+) (Result, bool, error) {
+	key, err := sourceKey(sourcePath, transform)
+	if err != nil {
+		return Result{}, false, err
 	}
 	cachePath := filepath.Join(store.directory, key[:2], key+extension)
 	data, err := os.ReadFile(cachePath)
 	if err == nil {
-		return Result{Key: key, Data: data, Hit: true, Path: cachePath}, nil
+		return Result{Key: key, Data: data, Hit: true, Path: cachePath}, true, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return Result{}, fmt.Errorf("%w: read cache entry: %v", ErrCache, err)
+		return Result{}, false, fmt.Errorf("%w: read cache entry: %v", ErrCache, err)
 	}
-
-	data, err = generate()
-	if err != nil {
-		return Result{}, err
-	}
-	if err := writeAtomically(cachePath, data); err != nil {
-		return Result{}, fmt.Errorf("%w: %v", ErrCache, err)
-	}
-	return Result{Key: key, Data: data, Hit: false, Path: cachePath}, nil
+	return Result{Key: key, Hit: false, Path: cachePath}, false, nil
 }
 
 func sourceKey(sourcePath string, transform string) (string, error) {

@@ -183,7 +183,7 @@
          (files '("/ssh:alice@example:/data/images/a.jpg"
                   "/ssh:alice@example:/data/images/b.jpg"
                   "/ssh:alice@example:/data/images/c.jpg"))
-         requested thumbnail-buffer originals)
+         requested prepared thumbnail-buffer originals)
     (unwind-protect
         (progn
           (with-temp-file thumbnail-file
@@ -196,10 +196,14 @@
                        (push original requested)
                        (funcall callback thumbnail-file)))
                     ((symbol-function 'pop-to-buffer)
-                     (lambda (buffer &rest _) buffer)))
+                     (lambda (buffer &rest _) buffer))
+                    ((symbol-function 'rimg--request-prepare)
+                     (lambda (_session page-files)
+                       (setq prepared page-files))))
             (setq thumbnail-buffer
                   (rimg--display-gallery session dired-buffer files)))
           (should (equal (nreverse requested) (seq-take files 2)))
+          (should (equal prepared (seq-take files 2)))
           (with-current-buffer thumbnail-buffer
             (goto-char (point-min))
             (while (not (eobp))
@@ -207,16 +211,20 @@
                 (push (image-dired-original-file-name) originals))
               (forward-char 1)))
           (should (equal (nreverse originals) (seq-take files 2)))
-          (setq requested nil originals nil)
+          (setq requested nil prepared nil originals nil)
           (cl-letf (((symbol-function 'rimg--request-thumbnail)
                      (lambda (_session original callback &optional _error-callback)
                        (push original requested)
                        (funcall callback thumbnail-file)))
                     ((symbol-function 'pop-to-buffer)
-                     (lambda (buffer &rest _) buffer)))
+                     (lambda (buffer &rest _) buffer))
+                    ((symbol-function 'rimg--request-prepare)
+                     (lambda (_session page-files)
+                       (setq prepared page-files))))
             (with-current-buffer thumbnail-buffer
               (rimg-next-page)))
           (should (equal requested (last files)))
+          (should (equal prepared (last files)))
           (with-current-buffer thumbnail-buffer
             (should (= rimg--gallery-page-index 1))
             (goto-char (point-min))
@@ -249,6 +257,99 @@
       (when (buffer-live-p dired-buffer)
         (kill-buffer dired-buffer))
       (delete-directory directory t))))
+
+(ert-deftest rimg-open-preview-displays-local-proxy-instead-of-remote-original ()
+  (let* ((remote (rimg--remote-from-path "/ssh:alice@example:/data/images/"))
+         (session (rimg--session-create :remote remote :state 'ready))
+         (original "/ssh:alice@example:/data/images/portrait.jpg")
+         (preview "/tmp/rimg-preview.jpg")
+         requested displayed
+         (buffer (generate-new-buffer " *rimg-preview-test*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (image-dired-thumbnail-mode)
+          (let ((inhibit-read-only t))
+            (insert (propertize "x"
+                                'image-dired-thumbnail t
+                                'original-file-name original)))
+          (goto-char (point-min))
+          (setq rimg--gallery-session session)
+          (rimg-thumbnail-mode 1)
+          (cl-letf (((symbol-function 'rimg--request-preview)
+                     (lambda (_session file callback &optional _error-callback)
+                       (setq requested file)
+                       (funcall callback preview)))
+                    ((symbol-function 'image-dired-display-image)
+                     (lambda (file &optional _ignored)
+                       (setq displayed file))))
+            (rimg-open-preview))
+          (should (equal requested original))
+          (should (equal displayed preview))
+          (should-not (file-remote-p displayed))
+          (setq displayed nil)
+          (cl-letf (((symbol-function 'image-dired-display-image)
+                     (lambda (file &optional _ignored)
+                       (setq displayed file))))
+            (rimg-open-original))
+          (should (equal displayed original))
+          (should (file-remote-p displayed))
+          (should (eq (lookup-key rimg-thumbnail-mode-map (kbd "RET"))
+                      #'rimg-open-preview)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest rimg-clear-local-cache-removes-only-the-current-remote ()
+  (let* ((cache-directory (make-temp-file "rimg-clear-cache-" t))
+         (rimg-local-cache-directory cache-directory)
+         (first (rimg--remote-from-path "/ssh:alice@first:/images/"))
+         (second (rimg--remote-from-path "/ssh:alice@second:/images/"))
+         (key (make-string 64 ?d))
+         (first-path (rimg--store-local-thumbnail first key "jpeg" "first"))
+         (second-path (rimg--store-local-thumbnail second key "jpeg" "second"))
+         (buffer (generate-new-buffer " *rimg-clear-cache-test*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq rimg--gallery-session
+                (rimg--session-create :remote first :state 'ready))
+          (rimg-thumbnail-mode 1)
+          (rimg-clear-local-cache)
+          (should-not (file-exists-p first-path))
+          (should (file-exists-p second-path)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (delete-directory cache-directory t))))
+
+(ert-deftest rimg-prune-remote-cache-uses-the-current-session-paths ()
+  (let* ((remote (rimg--remote-from-path "/ssh:alice@example:/images/"))
+         (session (rimg--session-create
+                   :remote remote :state 'ready
+                   :binary-path "/home/alice/.cache/rimg/bin/0.1.0/rimgd"
+                   :cache-dir "/home/alice/.cache/rimg/thumbs"))
+         (rimg-remote-cache-max-age-days 14)
+         (rimg-remote-cache-max-size-bytes 1048576)
+         (buffer (generate-new-buffer " *rimg-prune-test*"))
+         invocation)
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq rimg--gallery-session session)
+          (rimg-thumbnail-mode 1)
+          (cl-letf (((symbol-function 'rimg--remote-process-output)
+                     (lambda (called-remote program &rest arguments)
+                       (setq invocation
+                             (list called-remote program arguments))
+                       "{\"removed_files\":3,\"freed_bytes\":4096,\"remaining_bytes\":512}")))
+            (let ((result (rimg-prune-remote-cache)))
+              (should (= (alist-get 'removed_files result) 3))))
+          (should (eq (car invocation) remote))
+          (should (equal (cadr invocation)
+                         "/home/alice/.cache/rimg/bin/0.1.0/rimgd"))
+          (should
+           (equal (caddr invocation)
+                  '("prune" "--cache-dir" "/home/alice/.cache/rimg/thumbs"
+                    "--max-age" "336h" "--max-size-bytes" "1048576"
+                    "--json"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest rimg-ssh-command-forwards-loopback-to-remote-unix-socket ()
   (let* ((remote (rimg--remote-from-path
@@ -364,7 +465,7 @@
            (original-gallery-error
             (symbol-function 'rimg--gallery-thumbnail-error))
            (store-count 0)
-           request-errors
+           request-errors preview-errors preview-paths
            dired-buffer thumbnail-buffer session)
       (unwind-protect
           (cl-letf (((symbol-function 'rimg--store-local-thumbnail)
@@ -381,6 +482,7 @@
                   (with-current-buffer dired-buffer (rimg-dired)))
             (setq session
                   (buffer-local-value 'rimg--gallery-session thumbnail-buffer))
+            (should (alist-get 'prepare (rimg--session-capabilities session)))
             (with-current-buffer thumbnail-buffer
               (let ((deadline (+ (float-time) 30)))
                 (while (and (plusp rimg--gallery-pending)
@@ -405,7 +507,32 @@
               (should (zerop rimg--gallery-pending))
               (should-not request-errors)
               (should (= image-dired--number-of-thumbnails 3)))
-            (should (= store-count 3)))
+            (should (= store-count 3))
+            (let ((original
+                   (car (buffer-local-value
+                         'rimg--gallery-files thumbnail-buffer))))
+              (dotimes (_ 2)
+                (let ((done nil))
+                  (rimg--request-preview
+                   session original
+                   (lambda (path)
+                     (push path preview-paths)
+                     (setq done t))
+                   (lambda (error-data)
+                     (push error-data preview-errors)
+                     (setq done t)))
+                  (let ((deadline (+ (float-time) 30)))
+                    (while (and (not done) (< (float-time) deadline))
+                      (when url-queue
+                        (url-queue-run-queue))
+                      (accept-process-output nil 0.05)
+                      (sit-for 0.01)))
+                  (should done))))
+            (should-not preview-errors)
+            (should (= store-count 4))
+            (should (= (length preview-paths) 2))
+            (should (equal (car preview-paths) (cadr preview-paths)))
+            (should (file-regular-p (car preview-paths))))
         (when session
           (rimg--disconnect-session session))
         (when (buffer-live-p thumbnail-buffer)
