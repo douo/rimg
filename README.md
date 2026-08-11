@@ -16,8 +16,8 @@ installer, database, Docker, or replacement file manager.
 
 ## Current Status
 
-Implementation is active. See [STATUS.md](STATUS.md) for the live checkpoint
-and [PLAN.md](PLAN.md) for milestone acceptance criteria.
+The MVP implementation and real-host E2E acceptance are complete. See
+[STATUS.md](STATUS.md), [PLAN.md](PLAN.md), and [docs/e2e.md](docs/e2e.md).
 
 ## Development
 

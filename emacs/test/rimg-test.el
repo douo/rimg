@@ -4,6 +4,38 @@
 (require 'image-dired)
 (require 'rimg)
 
+(defun rimg-test--sync-thumbnail-response (session path width height quality)
+  "Request PATH through SESSION and return selected response fields."
+  (let* ((url-proxy-services nil)
+         (url-request-method "POST")
+         (url-request-extra-headers '(("Content-Type" . "application/json")))
+         (url-request-data
+          (json-serialize
+           (list (cons 'path path) (cons 'width width) (cons 'height height)
+                 (cons 'fit "contain") (cons 'format "jpeg")
+                 (cons 'quality quality))))
+         (buffer
+          (url-retrieve-synchronously
+           (format "http://127.0.0.1:%d/v1/thumb"
+                   (rimg--session-local-port session))
+           t t 10)))
+    (unless buffer
+      (error "rimg test: thumbnail request timed out"))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let* ((body-start (rimg--response-body-start))
+                 (key (rimg--response-header "X-Rimg-Key" body-start))
+                 (cache (rimg--response-header "X-Rimg-Cache" body-start))
+                 (body (buffer-substring-no-properties body-start (point-max))))
+            (list (cons 'status url-http-response-status)
+                  (cons 'key key) (cons 'cache cache) (cons 'body body))))
+      (kill-buffer buffer))))
+
+(defun rimg-test--remote-socket-exists-p (remote socket-path)
+  "Return non-nil when SOCKET-PATH currently exists as a socket on REMOTE."
+  (let ((default-directory (rimg--remote-file-name remote "~/")))
+    (zerop (process-file "test" nil nil nil "-S" socket-path))))
+
 (ert-deftest rimg-remote-identity-is-stable-per-ssh-target ()
   (let ((first (rimg--remote-from-path
                 "/ssh:alice@example:/data/outputs/a/"))
@@ -392,7 +424,7 @@
                   "{\"ok\":true,\"protocol\":1,\"version\":\"0.1.0\","
                   "\"pid\":42,\"capabilities\":{"
                   "\"decode\":[\"jpeg\",\"png\",\"webp\"],"
-                  "\"encode\":[\"jpeg\",\"png\"],\"prepare\":false}}"))))
+                  "\"encode\":[\"jpeg\",\"png\"],\"prepare\":true}}"))))
     (should (equal (alist-get 'version health) "0.1.0"))
     (should (equal (alist-get 'decode (alist-get 'capabilities health))
                    '("jpeg" "png" "webp"))))
@@ -539,6 +571,206 @@
           (kill-buffer thumbnail-buffer))
         (when (buffer-live-p dired-buffer)
           (kill-buffer dired-buffer))
+        (delete-directory temp-root t)))))
+
+(ert-deftest rimg-e2e-two-sessions-use-distinct-sockets-and-share-remote-cache ()
+  :tags '(integration)
+  (let ((remote-directory (getenv "RIMG_E2E_REMOTE")))
+    (unless remote-directory
+      (ert-skip "RIMG_E2E_REMOTE is not set"))
+    (let* ((remote (rimg--remote-from-path remote-directory))
+           (first-sessions (make-hash-table :test #'equal))
+           (second-sessions (make-hash-table :test #'equal))
+           (fixture
+            (expand-file-name "sample.jpg" remote-directory))
+           first second)
+      (unwind-protect
+          (progn
+            (setq first
+                  (let ((rimg--sessions first-sessions))
+                    (rimg--connect-remote remote)))
+            (setq second
+                  (let ((rimg--sessions second-sessions))
+                    (rimg--connect-remote remote)))
+            (should-not (equal (rimg--session-socket-path first)
+                               (rimg--session-socket-path second)))
+            (should-not (= (rimg--session-local-port first)
+                           (rimg--session-local-port second)))
+            (dolist (session (list first second))
+              (let* ((health (rimg--request-health session))
+                     (pid (alist-get 'pid health))
+                     (port (rimg--session-local-port session))
+                     (local-listeners
+                      (with-temp-buffer
+                        (let ((status
+                               (process-file
+                                "/usr/sbin/lsof" nil (current-buffer) nil
+                                "-nP" "-a" (format "-iTCP:%d" port)
+                                "-sTCP:LISTEN")))
+                          (should (zerop status))
+                          (buffer-string))))
+                     (remote-tcp
+                      (rimg--remote-process-output remote "ss" "-ltnp"))
+                     (remote-unix
+                      (rimg--remote-process-output remote "ss" "-lxnp")))
+                (should
+                 (string-match-p
+                  (regexp-quote (format "127.0.0.1:%d" port))
+                  local-listeners))
+                (should-not
+                 (string-match-p (format "pid=%d," pid) remote-tcp))
+                (should
+                 (string-match-p (format "pid=%d," pid) remote-unix))
+                (should
+                 (string-match-p
+                  (regexp-quote (rimg--session-socket-path session))
+                  remote-unix))))
+            (rimg--remote-process-output
+             remote (rimg--session-binary-path first) "prune"
+             "--cache-dir" (rimg--session-cache-dir first)
+             "--max-age" "1ns" "--json")
+            (let* ((path (file-remote-p fixture 'localname))
+                   (cold (rimg-test--sync-thumbnail-response
+                          first path 137 139 79))
+                   (warm (rimg-test--sync-thumbnail-response
+                          second path 137 139 79)))
+              (should (equal (alist-get 'status cold) 200))
+              (should (equal (alist-get 'cache cold) "MISS"))
+              (should (equal (alist-get 'cache warm) "HIT"))
+              (should (equal (alist-get 'key cold) (alist-get 'key warm)))
+              (should (equal (alist-get 'body cold) (alist-get 'body warm)))))
+        (when first
+          (rimg--disconnect-session first))
+        (when second
+          (rimg--disconnect-session second))))))
+
+(ert-deftest rimg-e2e-forced-ssh-loss-marks-dead-and-cleans-remote-socket ()
+  :tags '(integration)
+  (let ((remote-directory (getenv "RIMG_E2E_REMOTE")))
+    (unless remote-directory
+      (ert-skip "RIMG_E2E_REMOTE is not set"))
+    (let* ((rimg--sessions (make-hash-table :test #'equal))
+           (remote (rimg--remote-from-path remote-directory))
+           (session (rimg--connect-remote remote))
+           (socket (rimg--session-socket-path session)))
+      (unwind-protect
+          (progn
+            (should (rimg-test--remote-socket-exists-p remote socket))
+            (delete-process (rimg--session-process session))
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (not (eq (rimg--session-state session) 'dead))
+                          (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            (should (eq (rimg--session-state session) 'dead))
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (rimg-test--remote-socket-exists-p remote socket)
+                          (< (float-time) deadline))
+                (sleep-for 0.05)))
+            (should-not (rimg-test--remote-socket-exists-p remote socket)))
+        (when (process-live-p (rimg--session-process session))
+          (rimg--disconnect-session session))))))
+
+(ert-deftest rimg-e2e-remote-mtime-change-invalidates-thumbnail-key ()
+  :tags '(integration)
+  (let ((remote-directory (getenv "RIMG_E2E_REMOTE")))
+    (unless remote-directory
+      (ert-skip "RIMG_E2E_REMOTE is not set"))
+    (let* ((rimg--sessions (make-hash-table :test #'equal))
+           (remote (rimg--remote-from-path remote-directory))
+           (fixture
+            (file-remote-p
+             (expand-file-name "sample.jpg" remote-directory)
+             'localname))
+           (temporary-directory
+            (rimg--remote-process-output
+             remote "mktemp" "-d" "/tmp/rimg-e2e-XXXXXXXX"))
+           (temporary-path
+            (expand-file-name "fixture.jpg" temporary-directory))
+           (temporary-file (rimg--remote-file-name remote temporary-path))
+           session)
+      (unwind-protect
+          (progn
+            (rimg--remote-process-output
+             remote "cp" "--" fixture temporary-path)
+            (setq session (rimg--connect-remote remote))
+            (let ((first (rimg-test--sync-thumbnail-response
+                          session temporary-path 143 149 78)))
+              (should (equal (alist-get 'cache first) "MISS"))
+              (sleep-for 0.01)
+              (rimg--remote-process-output remote "touch" "-m" temporary-path)
+              (let ((second (rimg-test--sync-thumbnail-response
+                             session temporary-path 143 149 78)))
+                (should (equal (alist-get 'cache second) "MISS"))
+                (should-not (equal (alist-get 'key first)
+                                   (alist-get 'key second))))))
+        (when session
+          (rimg--disconnect-session session))
+        (when (file-exists-p temporary-file)
+          (delete-file temporary-file))
+        (let ((remote-temp-directory
+               (rimg--remote-file-name remote temporary-directory)))
+          (when (file-directory-p remote-temp-directory)
+            (delete-directory remote-temp-directory)))))))
+
+(ert-deftest rimg-e2e-records-cold-remote-warm-and-local-warm-measurements ()
+  :tags '(integration)
+  (let ((remote-directory (getenv "RIMG_E2E_REMOTE")))
+    (unless remote-directory
+      (ert-skip "RIMG_E2E_REMOTE is not set"))
+    (let* ((temp-root (make-temp-file "rimg-perf-e2e-" t))
+           (rimg--sessions (make-hash-table :test #'equal))
+           (rimg-local-cache-directory (expand-file-name "cache/" temp-root))
+           (remote (rimg--remote-from-path remote-directory))
+           (fixture
+            (expand-file-name "sample.jpg" remote-directory))
+           (original-store (symbol-function 'rimg--store-local-thumbnail))
+           body-writes session)
+      (unwind-protect
+          (progn
+            (setq session (rimg--connect-remote remote))
+            (rimg--remote-process-output
+             remote (rimg--session-binary-path session) "prune"
+             "--cache-dir" (rimg--session-cache-dir session)
+             "--max-age" "1ns" "--json")
+            (cl-labels
+                ((fetch ()
+                   (let ((started (float-time)) done request-error)
+                     (rimg--request-thumbnail
+                      session fixture (lambda (_path) (setq done t))
+                      (lambda (error-data)
+                        (setq request-error error-data done t)))
+                     (let ((deadline (+ (float-time) 30)))
+                       (while (and (not done) (< (float-time) deadline))
+                         (when url-queue
+                           (url-queue-run-queue))
+                         (accept-process-output nil 0.05)
+                         (sit-for 0.01)))
+                     (should done)
+                     (should-not request-error)
+                     (- (float-time) started))))
+              (cl-letf (((symbol-function 'rimg--store-local-thumbnail)
+                         (lambda (called-remote key format data)
+                           (push (string-bytes data) body-writes)
+                           (funcall original-store
+                                    called-remote key format data))))
+                (let ((cold-seconds (fetch)))
+                  (delete-directory
+                   (rimg--local-remote-cache-directory remote) t)
+                  (let ((remote-warm-seconds (fetch))
+                        local-warm-seconds)
+                    (setq local-warm-seconds (fetch))
+                    (should (= (length body-writes) 2))
+                    (should (= (car body-writes) (cadr body-writes)))
+                    (princ
+                     (format
+                      (concat "RIMG_E2E_PERF original_bytes=%d body_bytes=%d "
+                              "cold_seconds=%.6f remote_warm_seconds=%.6f "
+                              "local_warm_seconds=%.6f local_warm_body_writes=0\n")
+                      (file-attribute-size (file-attributes fixture))
+                      (car body-writes)
+                      cold-seconds remote-warm-seconds local-warm-seconds)))))))
+        (when session
+          (rimg--disconnect-session session))
         (delete-directory temp-root t)))))
 
 (provide 'rimg-test)
