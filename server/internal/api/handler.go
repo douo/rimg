@@ -59,7 +59,7 @@ func handleHealth(response http.ResponseWriter, _ *http.Request) {
 		Capabilities: capabilities{
 			Decode:  []string{"jpeg", "png", "webp"},
 			Encode:  []string{"jpeg", "png"},
-			Prepare: true,
+			Prepare: false,
 		},
 	})
 }

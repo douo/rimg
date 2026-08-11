@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/douo/rimg/server/internal/api"
@@ -100,7 +101,9 @@ func runServe(arguments []string) {
 		os.Exit(2)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(
+		context.Background(), os.Interrupt, syscall.SIGHUP, syscall.SIGTERM,
+	)
 	defer stop()
 	if err := rimgserver.Serve(ctx, rimgserver.Options{
 		SocketPath: *socketPath,

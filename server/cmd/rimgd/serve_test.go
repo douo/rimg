@@ -11,11 +11,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T) {
+func TestServeExposesHealthOnPrivateUnixSocketAndCleansUpAfterSIGTERM(t *testing.T) {
+	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGTERM)
+}
+
+func TestServeExposesHealthOnPrivateUnixSocketAndCleansUpAfterSIGHUP(t *testing.T) {
+	testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t, syscall.SIGHUP)
+}
+
+func testServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T, shutdownSignal os.Signal) {
+	t.Helper()
 	tempDir, err := os.MkdirTemp("/tmp", "rimg-test-")
 	if err != nil {
 		t.Fatalf("create short temp directory: %v", err)
@@ -96,8 +106,8 @@ func TestServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T) {
 	if got := fmt.Sprint(health.Capabilities.Encode); got != "[jpeg png]" {
 		t.Fatalf("encode capabilities = %s", got)
 	}
-	if !health.Capabilities.Prepare {
-		t.Fatal("prepare capability is false")
+	if health.Capabilities.Prepare {
+		t.Fatal("prepare capability is true before /v1/prepare is implemented")
 	}
 
 	info, err := os.Stat(socket)
@@ -108,8 +118,8 @@ func TestServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T) {
 		t.Fatalf("socket permissions = %04o, want 0600", permissions)
 	}
 
-	if err := command.Process.Signal(os.Interrupt); err != nil {
-		t.Fatalf("interrupt rimgd: %v", err)
+	if err := command.Process.Signal(shutdownSignal); err != nil {
+		t.Fatalf("signal rimgd with %v: %v", shutdownSignal, err)
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- command.Wait() }()
@@ -120,7 +130,7 @@ func TestServeExposesHealthOnPrivateUnixSocketAndCleansUp(t *testing.T) {
 			t.Fatalf("rimgd exit: %v\n%s", err, processOutput.String())
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("rimgd did not exit after interrupt")
+		t.Fatalf("rimgd did not exit after %v", shutdownSignal)
 	}
 
 	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
