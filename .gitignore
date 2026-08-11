@@ -6,3 +6,7 @@ coverage.out
 server/rimgd
 dist/*
 !dist/.gitkeep
+
+# Local working documents.
+/PLAN.md
+/STATUS.md
