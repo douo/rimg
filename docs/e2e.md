@@ -1,6 +1,8 @@
 # End-to-End Verification
 
-Verification date: 2026-08-11 (Asia/Shanghai)
+Image verification date: 2026-08-11 (Asia/Shanghai)
+
+Video verification date: 2026-09-05 (Asia/Shanghai)
 
 The measurements below were collected on a private Linux amd64 fixture host.
 Host aliases, user names, and source paths are intentionally omitted. Public
@@ -12,6 +14,14 @@ RIMG_E2E_REMOTE=/ssh:example-host:/srv/images/
 
 Tests that need one source image select the first supported image in that
 directory. Set `RIMG_E2E_IMAGE` to a full TRAMP path to choose one explicitly.
+
+The separate rvid transport contract test is also opt-in.  It bootstraps
+`rvidd`, registers one regular file, and verifies that a one-byte request
+returns `206 Partial Content`:
+
+```text
+RVID_E2E_REMOTE_FILE=/ssh:example-host:/srv/videos/sample.mp4
+```
 
 ## Results
 
@@ -28,6 +38,15 @@ directory. Set `RIMG_E2E_IMAGE` to a full TRAMP path to choose one explicitly.
 - Forced SSH loss changed the session to DEAD and removed the remote socket.
 - Full remote-enabled ERT result: 23 passed, 0 skipped, 0 unexpected.
 - Final cleanup left no rimgd process and no socket in the rimg runtime path.
+
+The video fixture verification additionally established that:
+
+- rvidd bootstrap, authenticated registration, and capability revocation
+  completed on a real Linux amd64 host.
+- A byte-range request returned `206 Partial Content` without copying the full
+  video through Emacs.
+- The embedded WebKit player loaded a 10.125-second H.264/AAC MP4, reported
+  `readyState=4` with no media error, and reached the end of playback.
 
 ## Measurements
 

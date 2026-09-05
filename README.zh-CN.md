@@ -1,4 +1,4 @@
-# rimg
+# rimg / rvid
 
 [English](README.md)
 
@@ -7,6 +7,11 @@ Image-Dired 原有的职责。Emacs 继续负责远程文件管理；远端 Linu
 Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并在数据源附近缓存结果。
 
 因此 Image-Dired 只需通过 SSH 传输缩略图大小的数据，而不必反复下载完整原图。
+
+配套的 `rvid` 客户端可以把远程视频交给本地 mpv 或 Emacs 内嵌的 WebKit
+xwidget 播放。独立的 `rvidd` 只提供 capability 限定的 HTTP 字节区间读取，拖动
+进度条不需要先下载完整文件。两个客户端共享 `rbridge.el` 中经过验证的
+TRAMP/OpenSSH 会话实现。
 
 ## 功能
 
@@ -19,6 +24,10 @@ Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并�
 - `RET` 打开尺寸受限的本地预览；打开远程原图必须显式执行。
 - 大目录按每页 200 张分页，并按视口懒加载，只请求可见行和少量预取行。
 - 预先创建固定画廊槽位，并行响应不会打乱图片顺序、移动选中项或改变网格宽度。
+- 无需挂载远程文件系统，即可播放任意调用方传入的远程 TRAMP 视频路径。
+- 视频字节从 SSH 转发直接进入 mpv 或 WebKit；Emacs 只发送很小的 capability
+  注册请求。
+- 支持 `HEAD`、HTTP Range、跳转、文件变化检测、按文件授权、闲置过期与显式撤销。
 
 ## 环境要求
 
@@ -26,6 +35,8 @@ Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并�
 
 - GNU Emacs 32 或更高版本。
 - 支持“本地 TCP 转发到远端 Unix socket”的 OpenSSH。
+- 自动视频后端优先使用本地 mpv；没有 mpv 时回退到带 xwidget WebKit 的图形
+  Emacs 播放浏览器兼容格式。
 - 构建 Linux 服务端产物时需要 Go 1.25 或更高版本。
 
 远端：
@@ -36,7 +47,7 @@ Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并�
 
 ## 安装
 
-克隆仓库并构建两个静态 Linux 服务端产物：
+克隆仓库并构建 `rimgd` 与 `rvidd` 的静态 Linux 服务端产物：
 
 ```sh
 git clone https://github.com/douo/rimg.git ~/.emacs.d/site-lisp/rimg
@@ -61,11 +72,22 @@ make -C ~/.emacs.d/site-lisp/rimg dist
              rimg-disconnect
              rimg-clear-local-cache
              rimg-prune-remote-cache))
+
+(use-package rvid
+  :load-path "~/.emacs.d/site-lisp/rimg/emacs"
+  :commands (rvid-play
+             rvid-play-in-emacs
+             rvid-stop
+             rvid-toggle-pause
+             rvid-seek-forward
+             rvid-seek-backward
+             rvid-reconnect
+             rvid-disconnect))
 ```
 
-默认情况下，Emacs 客户端会在仓库的 `dist/` 目录中查找
-`rimgd-linux-amd64` 和 `rimgd-linux-arm64`。如果产物位于其他目录，请设置
-`rimg-server-binary-directory`。
+默认情况下，Emacs 客户端会在仓库的 `dist/` 目录中查找 `rimgd-linux-*` 与
+`rvidd-linux-*`。如果产物位于其他目录，请设置
+`rimg-server-binary-directory` 或 `rvid-server-binary-directory`。
 
 ## 使用方法
 
@@ -96,6 +118,33 @@ make -C ~/.emacs.d/site-lisp/rimg dist
 | `M-x rimg-clear-local-cache` | 清理当前远端对应的本地缓存 |
 | `M-x rimg-prune-remote-cache` | 按时间和总大小清理远端缓存 |
 
+### 远程视频播放
+
+`rvid-play` 接受完整 TRAMP 文件名，并不依赖 Dired。可以从 Dired、文件补全、
+Consult 或 Embark 等任意位置把远程 file target 传给它。默认自动优先使用本地
+mpv；没有 mpv 时回退到 Emacs WebKit xwidget。也可以执行
+`M-x rvid-play-in-emacs` 强制使用 WebKit。
+
+用户配置可以用 Embark 的 `file` transformer 将受支持扩展名的 TRAMP 文件细分
+为 `rvid-remote-video`，并只在该类型的 action map 上绑定 `V` 到 `rvid-play`。
+这样目录、远程图片和本地视频都不会出现该 action。也可以进入 Embark 后通过
+`M-x` 执行 `rvid-play`。Embark 默认的 `embark-open-externally` 仍会先复制
+TRAMP 文件，不是 rvid 的流式入口。
+
+Embark 不是项目或软件包依赖：`rvid.el` 不加载、也不调用 Embark。目标分类和
+action 绑定应当只放在用户自己的 Emacs 配置中。
+
+播放命令：
+
+| 命令 | 用途 |
+| --- | --- |
+| `M-x rvid-stop` | 停止播放并撤销当前 capability |
+| `M-x rvid-toggle-pause` | 通过 mpv JSON IPC 暂停或继续 |
+| `M-x rvid-seek-forward` | 向前跳转 |
+| `M-x rvid-seek-backward` | 向后跳转 |
+| `M-x rvid-reconnect` | 重建当前远端 rvid 会话 |
+| `M-x rvid-disconnect` | 停止播放、SSH 与远端 rvidd |
+
 ## 工作原理
 
 `rimg` 将控制面与图片数据面分开：
@@ -113,6 +162,14 @@ Emacs -> Dired/TRAMP -> 远程路径、目录列表、标记和文件操作
   -> 127.0.0.1 临时端口
   -> 持久化本地缓存
   -> Image-Dired
+
+视频数据面
+远端视频
+  -> rvidd 只读字节区间
+  -> 每会话 Unix socket
+  -> OpenSSH 本地转发
+  -> 127.0.0.1 临时端口
+  -> 本地 mpv 或 WebKit
 ```
 
 ### 1. 引导与会话生命周期
@@ -158,8 +215,12 @@ Emacs 按远端身份划分本地缓存，并使用服务端返回的键保存�
 - `rimgd` 只提供健康检查、缩略图、预览和缓存预热接口，不提供 shell 执行、
   目录遍历、重命名或删除接口。
 - 远程路径由同一远端用户身份下的进程读取，`rimg` 不绕过该用户的文件权限。
+- `rvidd` 是独立进程，不会改变 `rimgd` 的“禁止原始文件读取”约束。注册路径必须
+  携带每会话 bearer 密钥；随后生成的随机 URL 只授权读取一个文件，闲置后过期，
+  并且可以显式撤销。
 
-更多细节参见[架构文档](docs/architecture.md)和[协议 v1](docs/protocol-v1.md)。
+更多细节参见[图片架构](docs/architecture.md)、[图片协议 v1](docs/protocol-v1.md)、
+[视频架构](docs/video-architecture.md)和[视频协议 v1](docs/video-protocol-v1.md)。
 
 ## 配置项
 
@@ -175,6 +236,11 @@ Emacs 按远端身份划分本地缓存，并使用服务端返回的键保存�
 | `rimg-preview-max-height` | `1920` | 预览图最大高度 |
 | `rimg-local-cache-directory` | `~/.cache/rimg-emacs/` | 本地缓存根目录 |
 | `rimg-server-cache-directory` | `~/.cache/rimg/thumbs` | 远端缓存根目录 |
+| `rvid-player-backend` | `auto` | 优先 `mpv`，否则内嵌 `xwidget`；也可强制指定 |
+| `rvid-mpv-program` | `mpv` | 本地 mpv 可执行文件 |
+| `rvid-mpv-arguments` | 网络缓存参数 | 额外 mpv 参数 |
+| `rvid-token-idle-ttl` | `24h` | capability 的闲置有效期 |
+| `rvid-max-open-media` | `256` | 单个 rvidd 会话的 capability 上限 |
 
 ## 开发与测试
 
@@ -200,11 +266,19 @@ RIMG_PHASE0_REMOTE_ORIGINAL=/ssh:example-host:/srv/images/sample.jpg \
 其他远程端到端测试使用 `RIMG_E2E_REMOTE`，详见
 [docs/e2e.md](docs/e2e.md)。
 
+rvid 的可选远端传输测试使用完整媒体路径：
+
+```sh
+RVID_E2E_REMOTE_FILE=/ssh:example-host:/srv/videos/sample.mp4 make test-emacs
+```
+
 ## 当前限制
 
 - 只支持单跳 `/ssh:` 和 `/sshx:` TRAMP 路径。
 - 远端服务目前只支持 Linux amd64 和 arm64。
 - 源图片支持 JPEG、PNG 和 WebP，输出格式支持 JPEG 和 PNG。
+- `rvid` 当前只传输原始字节，不转码或自适应码率；WebKit 支持的封装与编码少于 mpv。
+- 尚未实现外部字幕自动发现和断线后按原位置自动续播。
 - `rimg` 仍处于 MVP 阶段，尚未发布到 Emacs 软件包仓库。
 
 ## 许可证

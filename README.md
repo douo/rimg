@@ -1,4 +1,4 @@
-# rimg
+# rimg / rvid
 
 [简体中文](README.zh-CN.md)
 
@@ -9,6 +9,12 @@ thumbnails and previews, and caches the results close to the source files.
 
 The result is an Image-Dired gallery that transfers thumbnail-sized data over
 SSH instead of repeatedly downloading full-resolution originals.
+
+The companion `rvid` client plays remote videos through a local mpv process or
+an embedded WebKit xwidget.  Its separate `rvidd` service exposes only
+capability-scoped HTTP byte ranges, so seeking does not require downloading the
+whole remote file.  Both clients share the TRAMP/OpenSSH session machinery in
+`rbridge.el`.
 
 ## Features
 
@@ -24,6 +30,12 @@ SSH instead of repeatedly downloading full-resolution originals.
   loading. Only visible rows and a small prefetch window are requested.
 - Keeps fixed gallery slots so parallel responses cannot reorder thumbnails,
   move the selection, or change the grid width.
+- Plays any caller-supplied remote TRAMP video path without mounting the remote
+  filesystem.
+- Sends video bytes directly from the SSH forward to mpv or WebKit; Emacs only
+  performs the small capability-registration request.
+- Supports `HEAD`, HTTP byte ranges, seeking, file-change detection, expiring
+  per-file capabilities, and explicit revocation.
 
 ## Requirements
 
@@ -31,6 +43,8 @@ Local machine:
 
 - GNU Emacs 32 or newer.
 - OpenSSH with local TCP to remote Unix-socket forwarding support.
+- mpv for the preferred external video backend, or a graphical Emacs build with
+  xwidget WebKit support for compatible browser media formats.
 - Go 1.25 or newer when building the bundled Linux server artifacts.
 
 Remote machine:
@@ -42,7 +56,8 @@ Remote machine:
 
 ## Installation
 
-Clone the repository and build the two static Linux server artifacts:
+Clone the repository and build the static Linux server artifacts for `rimgd`
+and `rvidd`:
 
 ```sh
 git clone https://github.com/douo/rimg.git ~/.emacs.d/site-lisp/rimg
@@ -67,11 +82,23 @@ With `use-package`:
              rimg-disconnect
              rimg-clear-local-cache
              rimg-prune-remote-cache))
+
+(use-package rvid
+  :load-path "~/.emacs.d/site-lisp/rimg/emacs"
+  :commands (rvid-play
+             rvid-play-in-emacs
+             rvid-stop
+             rvid-toggle-pause
+             rvid-seek-forward
+             rvid-seek-backward
+             rvid-reconnect
+             rvid-disconnect))
 ```
 
-The Emacs client looks for `rimgd-linux-amd64` and
-`rimgd-linux-arm64` under the repository's `dist/` directory by default. Set
-`rimg-server-binary-directory` if the artifacts are stored elsewhere.
+The Emacs clients look for the `rimgd-linux-*` and `rvidd-linux-*` artifacts
+under the repository's `dist/` directory by default. Set
+`rimg-server-binary-directory` or `rvid-server-binary-directory` if the
+artifacts are stored elsewhere.
 
 ## Usage
 
@@ -102,6 +129,35 @@ Maintenance commands:
 | `M-x rimg-clear-local-cache` | Clear the local cache for the current remote |
 | `M-x rimg-prune-remote-cache` | Apply age and size limits to the remote cache |
 
+### Remote video playback
+
+`rvid-play` accepts a complete TRAMP file name and does not depend on Dired.
+Pass it a remote file target from Dired, file completion, Consult, Embark, or
+any other source.  Its `auto` backend prefers local mpv and falls back to an
+Emacs WebKit xwidget.  Run `M-x rvid-play-in-emacs` to force WebKit.
+
+A user configuration can refine supported TRAMP video extensions from `file`
+to an `rvid-remote-video` Embark target and bind `V` only in that type's action
+map.  Directories, remote images, and local videos then do not expose the
+action.  `rvid-play` also remains available through `M-x` after entering
+Embark.  Embark's existing `embark-open-externally` still copies a TRAMP file
+before opening it and is not the rvid streaming path.
+
+Embark is not a project or package dependency: `rvid.el` neither loads nor
+calls it.  Target refinement and action bindings belong in the user's personal
+Emacs configuration.
+
+Playback commands:
+
+| Command | Purpose |
+| --- | --- |
+| `M-x rvid-stop` | Stop playback and revoke the current media capability |
+| `M-x rvid-toggle-pause` | Toggle pause through mpv JSON IPC |
+| `M-x rvid-seek-forward` | Seek forward through mpv JSON IPC |
+| `M-x rvid-seek-backward` | Seek backward through mpv JSON IPC |
+| `M-x rvid-reconnect` | Replace the current remote rvid session |
+| `M-x rvid-disconnect` | Stop playback, SSH, and the remote rvidd process |
+
 ## How It Works
 
 `rimg` separates the control plane from the image data plane:
@@ -119,6 +175,14 @@ remote original
   -> 127.0.0.1 ephemeral port
   -> persistent local cache
   -> Image-Dired
+
+Video data plane
+remote video
+  -> rvidd read-only byte range
+  -> per-session Unix socket
+  -> OpenSSH local forward
+  -> 127.0.0.1 ephemeral port
+  -> local mpv or WebKit
 ```
 
 ### 1. Bootstrap and session lifecycle
@@ -175,9 +239,15 @@ selected image or reshaping the grid.
   it does not expose shell execution, directory listing, rename, or deletion.
 - Remote paths are sent to a process running as the same remote user. `rimg`
   does not bypass that user's filesystem permissions.
+- `rvidd` is a separate process and never changes `rimgd`'s no-raw-read
+  contract. Registering a remote path requires a per-session bearer secret.
+  The resulting unpredictable URL grants read-only access to one file, expires
+  after an idle period, and can be revoked explicitly.
 
 See [the architecture document](docs/architecture.md) and
-[protocol v1](docs/protocol-v1.md) for more detail.
+[image protocol v1](docs/protocol-v1.md), plus the
+[video architecture](docs/video-architecture.md) and
+[video protocol v1](docs/video-protocol-v1.md), for more detail.
 
 ## Configuration
 
@@ -193,6 +263,11 @@ Important customization variables include:
 | `rimg-preview-max-height` | `1920` | Maximum preview height |
 | `rimg-local-cache-directory` | `~/.cache/rimg-emacs/` | Local cache root |
 | `rimg-server-cache-directory` | `~/.cache/rimg/thumbs` | Remote cache root |
+| `rvid-player-backend` | `auto` | Prefer `mpv`, otherwise use `xwidget`; either can be forced |
+| `rvid-mpv-program` | `mpv` | Local mpv executable |
+| `rvid-mpv-arguments` | network cache options | Additional mpv arguments |
+| `rvid-token-idle-ttl` | `24h` | Idle lifetime of a media capability |
+| `rvid-max-open-media` | `256` | Capability limit for one rvidd session |
 
 ## Development
 
@@ -218,12 +293,22 @@ RIMG_PHASE0_REMOTE_ORIGINAL=/ssh:example-host:/srv/images/sample.jpg \
 Other remote end-to-end tests use `RIMG_E2E_REMOTE`; see
 [docs/e2e.md](docs/e2e.md).
 
+The opt-in rvid transport test uses a full remote media path:
+
+```sh
+RVID_E2E_REMOTE_FILE=/ssh:example-host:/srv/videos/sample.mp4 make test-emacs
+```
+
 ## Current Limitations
 
 - Only single-hop `/ssh:` and `/sshx:` TRAMP paths are supported.
 - The remote server currently supports Linux amd64 and arm64.
 - Source decode formats are JPEG, PNG, and WebP; output formats are JPEG and
   PNG.
+- `rvid` currently serves original file bytes and does not transcode or adapt
+  bitrate. WebKit playback supports fewer containers/codecs than mpv.
+- External subtitle discovery and automatic reconnect-at-position are not yet
+  implemented.
 - `rimg` is an MVP and is not yet distributed through an Emacs package archive.
 
 ## License

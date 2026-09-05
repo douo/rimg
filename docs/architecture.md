@@ -7,9 +7,16 @@ Image-Dired. Dired remains the file manager, TRAMP remains the remote path and
 bootstrap control plane, and OpenSSH remains the authentication and encrypted
 transport layer.
 
+The remote parsing, binary bootstrap, SSH forwarding, and session lifecycle
+now live in `rbridge.el`, which is also used by the separate remote-video
+client.  The image protocol and `rimgd` process remain independent from the
+raw byte-range service described in
+[the video architecture](video-architecture.md).
+
 The system consists of:
 
-- `rimg.el`, an Emacs client.
+- `rbridge.el`, the shared transport layer.
+- `rimg.el`, an Emacs image client.
 - `rimgd`, a per-session remote Go process.
 
 ## Data Flow

@@ -21,15 +21,14 @@ func Serve(ctx context.Context, options Options) error {
 	if options.SocketPath == "" {
 		return errors.New("socket path is required")
 	}
-	if options.CacheDir == "" {
-		return errors.New("cache directory is required")
-	}
 	if options.Handler == nil {
 		return errors.New("HTTP handler is required")
 	}
 
-	if err := os.MkdirAll(options.CacheDir, 0o700); err != nil {
-		return fmt.Errorf("create cache directory: %w", err)
+	if options.CacheDir != "" {
+		if err := os.MkdirAll(options.CacheDir, 0o700); err != nil {
+			return fmt.Errorf("create cache directory: %w", err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(options.SocketPath), 0o700); err != nil {
 		return fmt.Errorf("create socket directory: %w", err)
@@ -48,6 +47,7 @@ func Serve(ctx context.Context, options Options) error {
 	httpServer := &http.Server{
 		Handler:           options.Handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 	serveResult := make(chan error, 1)
 	go func() {

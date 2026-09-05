@@ -12,4 +12,5 @@ dist:
 	./scripts/build-dist.sh
 
 clean:
-	rm -f dist/rimgd-linux-amd64 dist/rimgd-linux-arm64 dist/checksums.txt
+	rm -f dist/rimgd-linux-amd64 dist/rimgd-linux-arm64 \
+		dist/rvidd-linux-amd64 dist/rvidd-linux-arm64 dist/checksums.txt
