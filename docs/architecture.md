@@ -1,5 +1,19 @@
 # Architecture
 
+## Project Boundary
+
+`rimg` is both the repository name and the umbrella project name.  The
+repository ships two user-facing Emacs features: `rimg` for remote images and
+`rvid` for remote videos.  Keeping them together lets them share the generic
+TRAMP/OpenSSH transport and bootstrap implementation in `rbridge.el` without
+duplicating security-sensitive session code.
+
+The shared repository is not a shared media protocol.  `rimg.el`/`rimgd` and
+`rvid.el`/`rvidd` remain independently loadable features with separate remote
+processes, endpoints, and security contracts.  This document describes the
+image side; see [the video architecture](video-architecture.md) for the video
+side.
+
 ## Scope
 
 `rimg` adds a remote image data plane beneath Emacs TRAMP, Dired, and

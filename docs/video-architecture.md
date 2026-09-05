@@ -2,6 +2,10 @@
 
 ## Scope
 
+`rvid` is the remote-video feature shipped in the `rimg` umbrella project and
+repository.  It is independently loadable from the `rimg` image feature, while
+sharing the generic transport implementation in `rbridge.el`.
+
 `rvid` plays a caller-supplied TRAMP file path without mounting the remote
 filesystem and without relaying video bytes through an Emacs Lisp buffer.  It
 shares `rbridge.el` with `rimg`, but uses a separate `rvidd` process so the

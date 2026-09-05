@@ -1,20 +1,34 @@
-# rimg / rvid
+# rimg
 
 [简体中文](README.zh-CN.md)
 
-`rimg` accelerates remote image browsing in Emacs without replacing TRAMP,
-Dired, or Image-Dired. Emacs continues to manage remote files, while a small
-Go process on the remote Linux host decodes images, generates bounded
-thumbnails and previews, and caches the results close to the source files.
+`rimg` is the name of this repository and the umbrella project.  Despite its
+historically image-oriented name, the project intentionally contains two
+user-facing Emacs features:
+
+- `rimg` browses remote images through `rimg.el` and `rimgd`.
+- `rvid` plays remote videos through `rvid.el` and `rvidd`.
+
+They live in one project because both solve the same remote-media problem over
+TRAMP and SSH, and share remote-target parsing, binary deployment, SSH
+forwarding, and session lifecycle code in `rbridge.el`.  They remain separate
+Emacs features with separate remote processes and protocols: loading `rimg`
+does not load `rvid`, and using `rvid` does not weaken `rimgd`'s restricted
+image-serving interface.
+
+The `rimg` image feature accelerates remote image browsing in Emacs without
+replacing TRAMP, Dired, or Image-Dired. Emacs continues to manage remote files,
+while a small Go process on the remote Linux host decodes images, generates
+bounded thumbnails and previews, and caches the results close to the source
+files.
 
 The result is an Image-Dired gallery that transfers thumbnail-sized data over
 SSH instead of repeatedly downloading full-resolution originals.
 
-The companion `rvid` client plays remote videos through a local mpv process or
+The `rvid` video feature plays remote videos through a local mpv process or
 an embedded WebKit xwidget.  Its separate `rvidd` service exposes only
 capability-scoped HTTP byte ranges, so seeking does not require downloading the
-whole remote file.  Both clients share the TRAMP/OpenSSH session machinery in
-`rbridge.el`.
+whole remote file.
 
 ## Features
 
@@ -56,20 +70,22 @@ Remote machine:
 
 ## Installation
 
-Clone the repository and build the static Linux server artifacts for `rimgd`
-and `rvidd`:
+Clone the single `rimg` repository and build the static Linux server artifacts
+for both features, `rimgd` and `rvidd`:
 
 ```sh
 git clone https://github.com/douo/rimg.git ~/.emacs.d/site-lisp/rimg
 make -C ~/.emacs.d/site-lisp/rimg dist
 ```
 
-Add the Emacs client to your configuration:
+Loading one feature does not load the other.  Add only the feature or features
+you use to your Emacs configuration:
 
 ```elisp
 (add-to-list 'load-path
              (expand-file-name "~/.emacs.d/site-lisp/rimg/emacs"))
-(require 'rimg)
+(require 'rimg) ; Remote image browsing.
+(require 'rvid) ; Remote video playback; omit if unused.
 ```
 
 With `use-package`:
@@ -160,7 +176,8 @@ Playback commands:
 
 ## How It Works
 
-`rimg` separates the control plane from the image data plane:
+The two features reuse the same transport control plane but keep separate image
+and video data planes:
 
 ```text
 Control plane

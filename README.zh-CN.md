@@ -1,17 +1,29 @@
-# rimg / rvid
+# rimg
 
 [English](README.md)
 
-`rimg` 用于加速 Emacs 中的远程图片浏览，同时保留 TRAMP、Dired 和
-Image-Dired 原有的职责。Emacs 继续负责远程文件管理；远端 Linux 主机上的小型
-Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并在数据源附近缓存结果。
+`rimg` 是本仓库及整体项目的名称。虽然这个名字最初来自远程图片浏览，但项目
+现在有意包含两个面向用户、彼此独立的 Emacs 功能：
+
+- `rimg`：通过 `rimg.el` 与 `rimgd` 浏览远程图片。
+- `rvid`：通过 `rvid.el` 与 `rvidd` 播放远程视频。
+
+两者放在同一个项目中，是因为它们都解决“通过 TRAMP 和 SSH 使用远端媒体”这一
+问题，并共享 `rbridge.el` 提供的远端目标解析、二进制部署、SSH 转发及会话生命
+周期管理。它们并没有因此合并成一个 Emacs 功能：各自仍使用独立的软件包、远端
+进程和协议；加载 `rimg` 不会加载 `rvid`，使用 `rvid` 也不会放宽 `rimgd` 受限的
+图片服务接口。
+
+其中，`rimg` 图片功能用于加速 Emacs 中的远程图片浏览，同时保留 TRAMP、Dired
+和 Image-Dired 原有的职责。Emacs 继续负责远程文件管理；远端 Linux 主机上的
+小型 Go 进程负责解码图片、生成尺寸受限的缩略图和预览图，并在数据源附近缓存
+结果。
 
 因此 Image-Dired 只需通过 SSH 传输缩略图大小的数据，而不必反复下载完整原图。
 
-配套的 `rvid` 客户端可以把远程视频交给本地 mpv 或 Emacs 内嵌的 WebKit
+`rvid` 视频功能可以把远程视频交给本地 mpv 或 Emacs 内嵌的 WebKit
 xwidget 播放。独立的 `rvidd` 只提供 capability 限定的 HTTP 字节区间读取，拖动
-进度条不需要先下载完整文件。两个客户端共享 `rbridge.el` 中经过验证的
-TRAMP/OpenSSH 会话实现。
+进度条不需要先下载完整文件。
 
 ## 功能
 
@@ -47,19 +59,21 @@ TRAMP/OpenSSH 会话实现。
 
 ## 安装
 
-克隆仓库并构建 `rimgd` 与 `rvidd` 的静态 Linux 服务端产物：
+克隆这个名为 `rimg` 的单一仓库，并为两个功能构建 `rimgd` 与 `rvidd` 的静态
+Linux 服务端产物：
 
 ```sh
 git clone https://github.com/douo/rimg.git ~/.emacs.d/site-lisp/rimg
 make -C ~/.emacs.d/site-lisp/rimg dist
 ```
 
-在 Emacs 配置中加入客户端：
+两个功能不会互相隐式加载，只需在 Emacs 配置中加入自己使用的功能：
 
 ```elisp
 (add-to-list 'load-path
              (expand-file-name "~/.emacs.d/site-lisp/rimg/emacs"))
-(require 'rimg)
+(require 'rimg) ; 远程图片浏览。
+(require 'rvid) ; 远程视频播放；不需要时可省略。
 ```
 
 使用 `use-package` 时：
@@ -147,7 +161,7 @@ action 绑定应当只放在用户自己的 Emacs 配置中。
 
 ## 工作原理
 
-`rimg` 将控制面与图片数据面分开：
+两个功能复用同一套传输控制面，但保留彼此独立的图片与视频数据面：
 
 ```text
 控制面
