@@ -1,6 +1,6 @@
 ;;; rvid.el --- Play remote TRAMP media through a local player -*- lexical-binding: t -*-
 
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "32.0"))
 ;; Keywords: multimedia, files
 
@@ -30,7 +30,7 @@
   "Play remote media addressed by a TRAMP file name."
   :group 'multimedia)
 
-(defconst rvid-server-version "0.1.0")
+(defconst rvid-server-version "0.1.1")
 (defconst rvid-protocol-version 1)
 
 (defconst rvid--package-root
@@ -334,7 +334,7 @@ xwidget."
     (user-error "rvid: selected file is not remote"))
   (cond
    ((funcall rvid--file-directory-p-function file)
-    (user-error "rvid: selected path is a directory; select a video file"))
+    (user-error "rvid: selected path is a directory; select an audio or video file"))
    ((not (funcall rvid--file-regular-p-function file))
     (user-error "rvid: selected path is not a regular file"))))
 
@@ -430,7 +430,7 @@ is only used by an interactive `M-x rvid-play'."
 
 ;;;###autoload
 (defun rvid-play (file &optional backend)
-  "Play remote TRAMP FILE using BACKEND or `rvid-player-backend'."
+  "Play remote TRAMP audio or video FILE using BACKEND or `rvid-player-backend'."
   (interactive (list (rvid--file-at-point)))
   (rvid--validate-file file)
   (let ((backend (rvid--resolve-backend

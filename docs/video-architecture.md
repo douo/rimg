@@ -6,7 +6,7 @@
 repository.  It is independently loadable from the `rimg` image feature, while
 sharing the generic transport implementation in `rbridge.el`.
 
-`rvid` plays a caller-supplied TRAMP file path without mounting the remote
+`rvid` plays audio or video from a caller-supplied TRAMP file path without mounting the remote
 filesystem and without relaying video bytes through an Emacs Lisp buffer.  It
 shares `rbridge.el` with `rimg`, but uses a separate `rvidd` process so the
 image service retains its no-raw-read security contract.
@@ -80,7 +80,7 @@ metadata and support `If-Range` and other HTTP conditionals.
 The automatic backend prefers local mpv with its JSON IPC Unix socket and
 network cache enabled.  Pause and relative seek commands travel over that
 local IPC socket.  If mpv is unavailable, rvid falls back to an xwidget that
-opens an rvidd-generated HTML page containing a native `<video>` element.  A
+opens an rvidd-generated HTML page containing a native `<audio>` element for audio media types or `<video>` otherwise.  A
 restrictive Content Security Policy permits only the same-origin media URL and
 inline layout CSS.  This keeps the player inside
 an Emacs buffer, but available containers and codecs depend on WebKit.

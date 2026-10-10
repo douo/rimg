@@ -76,4 +76,30 @@
 
 (provide 'rbridge-test)
 
+(ert-deftest rbridge-upgrade-installs-new-version-and-reuses-verified-binary ()
+  (let* ((remote (rbridge-remote-from-path "/ssh:alice@example:/srv/song.mp3"))
+         (service (rbridge-test--service))
+         (installed-version "0.1.0")
+         installs)
+    (setf (rbridge-service-version service) "0.1.1")
+    (cl-letf (((symbol-function 'rbridge-remote-expanded-localname)
+               (lambda (_remote path) path))
+              ((symbol-function 'rbridge-remote-file-name)
+               (lambda (_remote _path) shell-file-name))
+              ((symbol-function 'rbridge-remote-process-output)
+               (lambda (&rest _args)
+                 (format "{\"version\":\"%s\",\"protocol\":1}" installed-version)))
+              ((symbol-function 'rbridge-local-server-artifact)
+               (lambda (&rest _args) "/tmp/dist/rvidd-linux-amd64"))
+              ((symbol-function 'rbridge-install-server)
+               (lambda (_remote _service artifact path)
+                 (push (list artifact path) installs)
+                 (setq installed-version "0.1.1"))))
+      (should (equal (rbridge-ensure-server remote service)
+                     "~/.cache/rvid/bin/0.1.1/rvidd"))
+      (should (equal installs '(("/tmp/dist/rvidd-linux-amd64"
+                                "~/.cache/rvid/bin/0.1.1/rvidd"))))
+      (rbridge-ensure-server remote service)
+      (should (= (length installs) 1)))))
+
 ;;; rbridge-test.el ends here

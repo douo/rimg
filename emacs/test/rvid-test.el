@@ -16,7 +16,7 @@
                    session)))
     (should (equal (rbridge-service-binary-name service) "rvidd"))
     (should (equal (rbridge-server-install-localname service)
-                   "~/.cache/rvid/bin/0.1.0/rvidd"))
+                   "~/.cache/rvid/bin/0.1.1/rvidd"))
     (should (member "--auth-token" arguments))
     (should (member "12h" arguments))
     (should (member "32" arguments))

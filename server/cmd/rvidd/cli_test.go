@@ -20,7 +20,7 @@ func TestVersionCommandReportsBinaryAndProtocolVersions(t *testing.T) {
 	if err := json.Unmarshal(output, &version); err != nil {
 		t.Fatalf("decode version JSON: %v\n%s", err, output)
 	}
-	if version.Version != "0.1.0" || version.Protocol != 1 {
+	if version.Version != "0.1.1" || version.Protocol != 1 {
 		t.Fatalf("unexpected version response: %+v", version)
 	}
 }

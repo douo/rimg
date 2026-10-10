@@ -6,7 +6,7 @@
 现在有意包含两个面向用户、彼此独立的 Emacs 功能：
 
 - `rimg`：通过 `rimg.el` 与 `rimgd` 浏览远程图片。
-- `rvid`：通过 `rvid.el` 与 `rvidd` 播放远程视频。
+- `rvid`：通过 `rvid.el` 与 `rvidd` 播放远程视频和音频。
 
 两者放在同一个项目中，是因为它们都解决“通过 TRAMP 和 SSH 使用远端媒体”这一
 问题，并共享 `rbridge.el` 提供的远端目标解析、二进制部署、SSH 转发及会话生命
@@ -132,12 +132,29 @@ make -C ~/.emacs.d/site-lisp/rimg dist
 | `M-x rimg-clear-local-cache` | 清理当前远端对应的本地缓存 |
 | `M-x rimg-prune-remote-cache` | 按时间和总大小清理远端缓存 |
 
-### 远程视频播放
+### 远程视频与音频播放
+
+音频播放器版本为 `0.1.1`。更新源码后执行 `make dist`，重新编译或加载
+`emacs/rvid.el`，再运行 `M-x rvid-reconnect`。客户端会检查远端版本，自动将匹配
+平台的二进制安装到 `~/.cache/rvid/bin/0.1.1/rvidd` 并验证版本；首次连接其他
+服务器时同样自动安装。需要保持 `rvid-bootstrap-enabled` 为非 nil。
 
 `rvid-play` 接受完整 TRAMP 文件名，并不依赖 Dired。可以从 Dired、文件补全、
 Consult 或 Embark 等任意位置把远程 file target 传给它。默认自动优先使用本地
 mpv；没有 mpv 时回退到 Emacs WebKit xwidget。也可以执行
 `M-x rvid-play-in-emacs` 强制使用 WebKit。
+
+音频使用相同入口：在远程 Dired 中选中音频文件后执行 `M-x rvid-play`，或直接调用：
+
+```elisp
+(rvid-play "/ssh:user@host:/srv/music/song.mp3")
+```
+
+服务端识别 MP3、M4A、AAC、FLAC、OGG、Opus 和 WAV 的媒体类型；实际解码能力
+取决于播放器，推荐使用 mpv。WebKit 会为音频显示原生 `<audio>` 控件，支持的
+格式取决于系统与 WebKit 版本。暂停、跳转和停止复用下方命令；WebKit 使用页面
+控件暂停和跳转。如果个人 Embark 配置只匹配视频扩展名，需要将音频扩展名加入
+匹配规则。
 
 用户配置可以用 Embark 的 `file` transformer 将受支持扩展名的 TRAMP 文件细分
 为 `rvid-remote-video`，并只在该类型的 action map 上绑定 `V` 到 `rvid-play`。

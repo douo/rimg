@@ -7,7 +7,7 @@ historically image-oriented name, the project intentionally contains two
 user-facing Emacs features:
 
 - `rimg` browses remote images through `rimg.el` and `rimgd`.
-- `rvid` plays remote videos through `rvid.el` and `rvidd`.
+- `rvid` plays remote videos and audio through `rvid.el` and `rvidd`.
 
 They live in one project because both solve the same remote-media problem over
 TRAMP and SSH, and share remote-target parsing, binary deployment, SSH
@@ -145,12 +145,33 @@ Maintenance commands:
 | `M-x rimg-clear-local-cache` | Clear the local cache for the current remote |
 | `M-x rimg-prune-remote-cache` | Apply age and size limits to the remote cache |
 
-### Remote video playback
+### Remote video and audio playback
+
+The audio player release is `0.1.1`. After updating the source, run `make dist`,
+recompile or reload `emacs/rvid.el`, then run `M-x rvid-reconnect`. The client
+checks the remote version, automatically installs the matching platform binary
+at `~/.cache/rvid/bin/0.1.1/rvidd`, and verifies its version. First connections
+to other servers install it in the same way. Keep `rvid-bootstrap-enabled`
+non-nil to allow installation.
 
 `rvid-play` accepts a complete TRAMP file name and does not depend on Dired.
 Pass it a remote file target from Dired, file completion, Consult, Embark, or
 any other source.  Its `auto` backend prefers local mpv and falls back to an
 Emacs WebKit xwidget.  Run `M-x rvid-play-in-emacs` to force WebKit.
+
+Audio uses the same entry point: select a remote audio file in Dired and run
+`M-x rvid-play`, or call it directly:
+
+```elisp
+(rvid-play "/ssh:user@host:/srv/music/song.mp3")
+```
+
+The server recognizes MP3, M4A, AAC, FLAC, OGG, Opus, and WAV media types.
+Decoding depends on the player; mpv is recommended. WebKit displays native
+`<audio>` controls, with format support depending on the system and WebKit
+version. Audio shares the pause, seek, and stop commands below; use the page
+controls to pause and seek in WebKit. If your personal Embark configuration
+matches only video extensions, add audio extensions to its matching rules.
 
 A user configuration can refine supported TRAMP video extensions from `file`
 to an `rvid-remote-video` Embark target and bind `V` only in that type's action

@@ -16,6 +16,41 @@ import (
 
 const testAuthToken = "0123456789abcdef0123456789abcdef"
 
+func TestAudioRegistrationPlayerAndRanges(t *testing.T) {
+	for extension, wantType := range map[string]string{
+		".MP3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+		".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav",
+	} {
+		t.Run(extension, func(t *testing.T) {
+			handler := newTestHandler(t, time.Now, time.Hour)
+			path := filepath.Join(t.TempDir(), "song & sample"+extension)
+			if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opened := register(t, handler, path)
+			if opened.ContentType != wantType {
+				t.Fatalf("content type = %q, want %q", opened.ContentType, wantType)
+			}
+			player := httptest.NewRecorder()
+			handler.ServeHTTP(player, httptest.NewRequest(http.MethodGet, "/v1/player/"+opened.ID, nil))
+			body := player.Body.String()
+			if player.Code != http.StatusOK || !strings.Contains(body, "<audio controls") ||
+				strings.Contains(body, "<video") || !strings.Contains(body, `type="`+wantType+`"`) ||
+				!strings.Contains(body, "song &amp; sample") {
+				t.Fatalf("unexpected audio player: status=%d body=%s", player.Code, body)
+			}
+			request := httptest.NewRequest(http.MethodGet, opened.URLPath, nil)
+			request.Header.Set("Range", "bytes=2-5")
+			partial := httptest.NewRecorder()
+			handler.ServeHTTP(partial, request)
+			if partial.Code != http.StatusPartialContent || partial.Body.String() != "2345" ||
+				partial.Header().Get("Content-Type") != wantType {
+				t.Fatalf("unexpected audio range: status=%d headers=%v body=%s", partial.Code, partial.Header(), partial.Body.String())
+			}
+		})
+	}
+}
+
 type registeredMedia struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`

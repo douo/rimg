@@ -92,7 +92,8 @@ Unsatisfiable ranges return `416` with `Content-Range: bytes */SIZE`.
 
 `GET /v1/player/{capability}`
 
-Returns a minimal HTML document with a same-origin `<video controls>` element.
+Returns a minimal HTML document with a same-origin `<audio controls>` element
+for `audio/*` media types, and a `<video controls>` element otherwise.
 The page has a restrictive Content Security Policy and contains no script.
 
 ## Revoke Media

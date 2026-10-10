@@ -2,5 +2,5 @@ package rvidprotocol
 
 const (
 	Version       = 1
-	BinaryVersion = "0.1.0"
+	BinaryVersion = "0.1.1"
 )

@@ -123,8 +123,13 @@ var playerTemplate = template.Must(template.New("player").Parse(`<!doctype html>
 <title>{{.Name}}</title><style>
 html,body{height:100%;margin:0;background:#111}body{display:flex;align-items:center;justify-content:center}
 video{width:100%;height:100%;object-fit:contain}
+audio{width:90%;max-width:640px}
 </style></head><body>
+{{if .Audio}}
+<audio controls autoplay preload="metadata" aria-label="{{.Name}}"><source src="{{.Source}}" type="{{.ContentType}}"></audio>
+{{else}}
 <video controls autoplay playsinline preload="metadata"><source src="{{.Source}}" type="{{.ContentType}}"></video>
+{{end}}
 </body></html>`))
 
 func (handler *handler) handlePlayer(response http.ResponseWriter, request *http.Request) {
@@ -141,10 +146,12 @@ func (handler *handler) handlePlayer(response http.ResponseWriter, request *http
 		Name        string
 		Source      string
 		ContentType string
+		Audio       bool
 	}{
 		Name:        opened.Name,
 		Source:      "/v1/media/" + token + "/" + url.PathEscape(opened.Name),
 		ContentType: contentType(opened.Name),
+		Audio:       strings.HasPrefix(contentType(opened.Name), "audio/"),
 	})
 }
 
