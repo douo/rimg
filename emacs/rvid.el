@@ -25,6 +25,8 @@
 (declare-function dired-get-file-for-visit "dired")
 (declare-function get-buffer-xwidgets "xwidget.c" (buffer))
 (declare-function set-xwidget-query-on-exit-flag "xwidget.c" (xwidget flag))
+(declare-function xwidget-webkit--create-new-session-buffer "xwidget" (url &optional callback))
+(declare-function xwidget-webkit-adjust-size-to-window "xwidget" (xwidget &optional window))
 
 (defgroup rvid nil
   "Play remote media addressed by a TRAMP file name."
@@ -75,6 +77,18 @@ xwidget."
                  (const :tag "External mpv" mpv)
                  (const :tag "Embedded WebKit" xwidget)))
 
+(defcustom rvid-auto-quit nil
+  "Whether to close the player when playback ends.
+A prefix argument to a playback command toggles this for that invocation."
+  :type 'boolean)
+
+(defcustom rvid-player-window-height 8
+  "Height in lines of the embedded player's bottom side window."
+  :type 'integer)
+
+(defvar rvid--player-buffer nil
+  "Singleton buffer owned by the embedded player.")
+
 (defcustom rvid-mpv-program "mpv"
   "Local mpv executable used by the mpv backend."
   :type 'string)
@@ -108,6 +122,7 @@ xwidget."
   buffer
   ipc-socket
   runtime-directory
+  end-timer
   cleaned)
 
 (defvar rvid--sessions (make-hash-table :test #'equal)
@@ -348,7 +363,8 @@ xwidget."
           (append
            (list rvid-mpv-program)
            rvid-mpv-arguments
-           (list (format "--input-ipc-server=%s" ipc-socket)
+           (list (if rvid-auto-quit "--keep-open=no" "--keep-open=yes")
+                 (format "--input-ipc-server=%s" ipc-socket)
                  (format "--title=%s" (rvid-registration-name registration))
                  "--" url)))
          (playback
@@ -380,25 +396,59 @@ xwidget."
     playback))
 
 (defun rvid--start-xwidget (session registration)
-  "Start embedded WebKit playback for SESSION REGISTRATION."
-  (let* ((playback
-          (rvid-playback-create
-           :backend 'xwidget
-           :registration registration
-           :session session))
-         (url (rvid--player-url session registration)))
-    (xwidget-webkit-browse-url url t)
-    (let ((buffer (current-buffer)))
-      ;; This buffer is owned by rvid and its kill hook revokes the media
-      ;; capability.  Do not let the global xwidget query hook block
-      ;; `rvid-stop' or switching to the next video with a minibuffer prompt.
-      (dolist (xwidget (get-buffer-xwidgets buffer))
-        (set-xwidget-query-on-exit-flag xwidget nil))
-      (setf (rvid-playback-buffer playback) buffer)
-      (with-current-buffer buffer
-        (setq-local rvid--xwidget-playback playback)
-        (add-hook 'kill-buffer-hook #'rvid--xwidget-buffer-killed nil t)))
-    playback))
+  "Start embedded WebKit playback without selecting its window."
+  (let* ((url (rvid--player-url session registration))
+         (buffer
+          (if (buffer-live-p rvid--player-buffer)
+              rvid--player-buffer
+            (setq rvid--player-buffer
+                  (xwidget-webkit--create-new-session-buffer url))))
+         (playback (rvid-playback-create
+                    :backend 'xwidget :registration registration
+                    :session session :buffer buffer)))
+    (condition-case error-data
+        (progn
+          (with-current-buffer buffer
+            (rename-buffer "*rvid-player*" t)
+            (setq-local xwidget-webkit-buffer-name-format "*rvid-player*")
+            (setq-local rvid--xwidget-playback playback)
+            (add-hook 'kill-buffer-hook #'rvid--xwidget-buffer-killed nil t)
+            (dolist (widget (get-buffer-xwidgets buffer))
+              (set-xwidget-query-on-exit-flag widget nil)))
+          (let ((window
+                 (display-buffer-in-side-window
+                  buffer `((side . bottom) (slot . 0)
+                           (window-height . ,rvid-player-window-height))))
+                (widget (car (get-buffer-xwidgets buffer))))
+            (set-window-parameter window 'no-delete-other-windows t)
+            (xwidget-webkit-adjust-size-to-window widget window)
+            (xwidget-webkit-goto-uri widget url))
+          (when rvid-auto-quit
+            (setf (rvid-playback-end-timer playback)
+                  (run-at-time 0.5 0.5 #'rvid--check-ended playback)))
+          playback)
+      (error
+       (kill-buffer buffer)
+       (signal (car error-data) (cdr error-data))))))
+
+(defun rvid--check-ended (playback)
+  "Check whether the current embedded PLAYBACK has finished."
+  (when (and (eq playback rvid--current-playback)
+             (not (rvid-playback-cleaned playback))
+             (buffer-live-p (rvid-playback-buffer playback)))
+    (let ((widget (car (get-buffer-xwidgets (rvid-playback-buffer playback))))
+          (url (rvid--player-url (rvid-playback-session playback)
+                                 (rvid-playback-registration playback))))
+      (xwidget-webkit-execute-script
+       widget
+       (format "JSON.stringify(location.href === %s && !!document.querySelector('audio,video')?.ended)"
+               (json-serialize url))
+       (lambda (ended)
+         ;; A response from the previous URL must never stop its replacement.
+         (when (and (equal ended "true")
+                    (eq playback rvid--current-playback)
+                    (not (rvid-playback-cleaned playback)))
+           (rvid-stop)))))))
 
 (defun rvid--xwidget-buffer-killed ()
   "Clean up the playback associated with the current xwidget buffer."
@@ -409,6 +459,9 @@ xwidget."
   "Release local and remote resources owned by PLAYBACK."
   (unless (rvid-playback-cleaned playback)
     (setf (rvid-playback-cleaned playback) t)
+    (when-let* ((timer (rvid-playback-end-timer playback)))
+      (cancel-timer timer)
+      (setf (rvid-playback-end-timer playback) nil))
     (rvid--revoke-registration
      (rvid-playback-session playback)
      (rvid-playback-registration playback))
@@ -429,14 +482,16 @@ is only used by an interactive `M-x rvid-play'."
    (t (read-file-name "Remote media file: " default-directory nil t))))
 
 ;;;###autoload
-(defun rvid-play (file &optional backend)
-  "Play remote TRAMP audio or video FILE using BACKEND or `rvid-player-backend'."
-  (interactive (list (rvid--file-at-point)))
+(defun rvid-play (file &optional backend toggle-auto-quit)
+  "Play remote TRAMP audio or video FILE using BACKEND or `rvid-player-backend'.
+With prefix argument TOGGLE-AUTO-QUIT, invert `rvid-auto-quit' for this play."
+  (interactive (list (rvid--file-at-point) nil current-prefix-arg))
   (rvid--validate-file file)
   (let ((backend (rvid--resolve-backend
-                  (or backend rvid-player-backend))))
+                  (or backend rvid-player-backend)))
+        (rvid-auto-quit (if toggle-auto-quit (not rvid-auto-quit) rvid-auto-quit)))
     (when rvid--current-playback
-      (rvid-stop))
+      (rvid-stop (eq backend 'xwidget)))
     (let* ((remote (rvid--remote-from-path file))
            (remote-localname
             (rbridge-remote-expanded-localname
@@ -457,13 +512,15 @@ is only used by an interactive `M-x rvid-play'."
       playback)))
 
 ;;;###autoload
-(defun rvid-play-in-emacs (file)
-  "Play remote FILE in an embedded WebKit xwidget."
-  (interactive (list (rvid--file-at-point)))
-  (rvid-play file 'xwidget))
+(defun rvid-play-in-emacs (file &optional toggle-auto-quit)
+  "Play remote FILE in the embedded player without selecting it.
+With prefix argument TOGGLE-AUTO-QUIT, invert `rvid-auto-quit' for this play."
+  (interactive (list (rvid--file-at-point) current-prefix-arg))
+  (rvid-play file 'xwidget toggle-auto-quit))
 
-(defun rvid-stop ()
-  "Stop the current rvid playback and revoke its media URL."
+(defun rvid-stop (&optional keep-buffer)
+  "Stop playback and revoke its media URL.
+Internal KEEP-BUFFER preserves the embedded buffer when replacing media."
   (interactive)
   (when-let* ((playback rvid--current-playback))
     (setf (rvid-playback-cleaned playback) t)
@@ -472,7 +529,15 @@ is only used by an interactive `M-x rvid-play'."
         (delete-process process)))
     (when-let* ((buffer (rvid-playback-buffer playback)))
       (when (buffer-live-p buffer)
-        (kill-buffer buffer)))
+        (if keep-buffer
+            (with-current-buffer buffer
+              (setq rvid--xwidget-playback nil)
+              (xwidget-webkit-goto-uri
+               (car (get-buffer-xwidgets buffer)) "about:blank"))
+          (dolist (window (get-buffer-window-list buffer nil t))
+            (when (window-parameter window 'window-side)
+              (delete-window window)))
+          (kill-buffer buffer))))
     ;; The cleaned flag prevents buffer/process sentinels from racing this
     ;; explicit cleanup, so release the resources here exactly once.
     (setf (rvid-playback-cleaned playback) nil)

@@ -184,6 +184,16 @@ Embark is not a project or package dependency: `rvid.el` neither loads nor
 calls it.  Target refinement and action bindings belong in the user's personal
 Emacs configuration.
 
+The embedded player uses a singleton `*rvid-player*` buffer in an eight-line
+bottom side window without selecting it. Playing another file reuses the buffer.
+Customize `rvid-player-window-height` to change its height. By default, controls
+remain after playback ends so you can replay the file. Use `C-u M-x rvid-play`
+or `C-u M-x rvid-play-in-emacs` to close the player and release the media
+capability when playback ends. Set `(setq rvid-auto-quit t)` to make that the
+default; the prefix then keeps the player open instead. mpv also respects the
+keep-open/auto-quit setting; the bottom window and focus behavior apply only to
+the embedded backend.
+
 Playback commands:
 
 | Command | Purpose |

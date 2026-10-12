@@ -165,6 +165,13 @@ TRAMP 文件，不是 rvid 的流式入口。
 Embark 不是项目或软件包依赖：`rvid.el` 不加载、也不调用 Embark。目标分类和
 action 绑定应当只放在用户自己的 Emacs 配置中。
 
+内嵌播放器使用底部 8 行的单例 `*rvid-player*` buffer，不切换当前窗口焦点；
+播放另一个文件时复用该 buffer。可以通过 `rvid-player-window-height` 调整高度。
+默认播放结束后保留控件，方便重播。使用 `C-u M-x rvid-play` 或
+`C-u M-x rvid-play-in-emacs`，本次播放结束后会关闭播放器并释放媒体访问权限。
+设置 `(setq rvid-auto-quit t)` 可改为默认自动退出，此时 `C-u` 反而保留播放器。
+mpv 同样遵循结束后保留/退出设置；底部窗口与不抢焦点的行为仅适用于内嵌后端。
+
 播放命令：
 
 | 命令 | 用途 |
